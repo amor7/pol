@@ -45,6 +45,29 @@ Without arguments the installer asks which server it is on. Run it again later, 
 
 ## Commands
 
+Type **`pol`** on either server for a menu of everything below, by number:
+
+```
+   pol v1.1.0  relay · running
+
+    1) Status
+    2) Add ports
+    3) Remove ports
+    4) List ports
+    5) Ping through the tunnel
+    6) Speed test
+    7) Logs (live - Ctrl+C to stop)
+    8) Restart
+    9) Stop
+   10) Speed up the network (BBR)
+   11) Update pol
+   12) Set up again
+   13) Uninstall
+    0) Exit
+```
+
+Or use the commands directly:
+
 On the **relay** (Iran):
 
 | Command | What it does |

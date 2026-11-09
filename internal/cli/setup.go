@@ -180,6 +180,7 @@ func setupServer(path string, old *config.Config, o opts) error {
 		"",
 		dim("If your provider has a firewall in its panel, open TCP " + strconv.Itoa(port) + " there."),
 		dim("`pol token` prints the token again whenever you need it."),
+		dim("Type `pol` any time for the menu."),
 	})
 	fmt.Println()
 	fmt.Println("   " + bold("On the Iran server, run this one line:"))
@@ -283,7 +284,7 @@ func setupRelay(path string, old *config.Config, o opts) error {
 		}
 		lines = append(lines, "", dim("Point your clients at this server's IP with the same ports."))
 	}
-	lines = append(lines, dim("`pol status` shows what is connected."))
+	lines = append(lines, dim("Type `pol` any time for the menu."))
 	box("Relay is ready", lines)
 	return nil
 }

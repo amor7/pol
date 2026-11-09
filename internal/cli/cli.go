@@ -17,6 +17,7 @@ import (
 const usage = `pol - forward ports from one server to another through one encrypted tunnel
 
 Usage: pol <command> [arguments]
+       pol               a menu of everything below, by number
 
 Setting up
   setup                     interactive setup (asks whether this is the server or the relay)
@@ -56,11 +57,16 @@ func Main(args []string) int {
 	}
 	rest := fs.Args()
 	if len(rest) == 0 {
-		fmt.Print(usage)
-		return 0
+		if !isTerminal() {
+			fmt.Print(usage)
+			return 0
+		}
+		rest = []string{"menu"}
 	}
 	var err error
 	switch cmd, a := rest[0], rest[1:]; cmd {
+	case "menu":
+		err = cmdMenu(*cfgPath)
 	case "run":
 		err = daemon.Run(*cfgPath)
 	case "setup", "install":
@@ -176,13 +182,20 @@ func visible(s string) int {
 
 var stdin = bufio.NewReader(os.Stdin)
 
+// inputClosed is set once stdin has ended (a dropped SSH session), so the
+// menu stops instead of asking forever.
+var inputClosed bool
+
 func ask(q, def string) string {
 	if def != "" {
 		fmt.Printf("   %s %s ", q, dim("["+def+"]"))
 	} else {
 		fmt.Printf("   %s ", q)
 	}
-	line, _ := stdin.ReadString('\n')
+	line, err := stdin.ReadString('\n')
+	if err != nil && line == "" {
+		inputClosed = true
+	}
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return def

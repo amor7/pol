@@ -59,6 +59,33 @@ bash <(curl -fsSL https://raw.githubusercontent.com/amor7/pol/main/install.sh) r
 
 ## دستورها
 
+روی هر کدام از دو سرور، فقط **`pol`** را بزنید تا منوی شماره‌دار باز شود و همهٔ کارهای زیر را از آنجا انجام دهید:
+
+</div>
+
+```
+   pol v1.1.0  relay · running
+
+    1) Status
+    2) Add ports
+    3) Remove ports
+    4) List ports
+    5) Ping through the tunnel
+    6) Speed test
+    7) Logs (live - Ctrl+C to stop)
+    8) Restart
+    9) Stop
+   10) Speed up the network (BBR)
+   11) Update pol
+   12) Set up again
+   13) Uninstall
+    0) Exit
+```
+
+<div dir="rtl">
+
+یا دستورها را مستقیم بزنید:
+
 روی **سرور ایران** (relay):
 
 | دستور | کار |
