@@ -105,7 +105,11 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 			if strings.TrimSpace(spec) == "" {
 				return nil
 			}
-			return cmdAdd(path, strings.Fields(spec))
+			mode, ok := askMode()
+			if !ok {
+				return nil
+			}
+			return cmdAdd(path, append(strings.Fields(spec), "--mode", mode))
 		}},
 		{"Remove ports", func() error {
 			if err := cmdList(path); err != nil {
@@ -119,8 +123,23 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 			return cmdDel(path, strings.Fields(spec))
 		}},
 		{"List ports", func() error { return cmdList(path) }},
+		{"Change the tunnel mode of ports", func() error {
+			if err := cmdList(path); err != nil {
+				return err
+			}
+			fmt.Println()
+			spec := ask("Ports to change:", "")
+			if strings.TrimSpace(spec) == "" {
+				return nil
+			}
+			mode, ok := askMode()
+			if !ok {
+				return nil
+			}
+			return cmdMode(path, append(strings.Fields(spec), mode))
+		}},
 		{"Ping through the tunnel", func() error { return cmdPing(path) }},
-		{"Speed test", func() error { return cmdSpeed(path, nil) }},
+		{"Speed test (compares the modes)", func() error { return cmdSpeed(path, nil) }},
 	}, common...), "relay · " + state
 }
 
@@ -139,4 +158,24 @@ func followLogs() error {
 	defer signal.Stop(c)
 	_ = cmdLogs([]string{"-f"})
 	return nil
+}
+
+// askMode offers the tunnel modes by number.
+func askMode() (string, bool) {
+	fmt.Println()
+	fmt.Println("   " + bold("Tunnel mode"))
+	fmt.Println("   1) " + bold("tls") + "    - a TLS connection per user connection: encrypted and fast " + dim("(recommended)"))
+	fmt.Println("   2) " + bold("mux") + "    - everything inside a few HTTP/2 connections: the most discreet, slower on bad paths")
+	fmt.Println("   3) " + bold("direct") + " - plain TCP straight to the port abroad: fastest, no encryption added,")
+	fmt.Println("                the port must be reachable from here")
+	switch ask("Choose 1, 2 or 3:", "1") {
+	case "1":
+		return config.ModeTLS, true
+	case "2":
+		return config.ModeMux, true
+	case "3":
+		return config.ModeDirect, true
+	}
+	warnf("choose 1, 2 or 3")
+	return "", false
 }

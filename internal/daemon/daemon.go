@@ -98,6 +98,7 @@ func runRelay(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		mu       sync.Mutex
 		r        = cfg.Relay
 		client   *tunnel.Client
+		raw      *tunnel.RawClient
 		cancelW  context.CancelFunc
 		mgr      *relay.Manager
 		lastMod  time.Time
@@ -108,6 +109,14 @@ func runRelay(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 			return time.Time{}
 		}
 	)
+	dialers := func(r *config.Relay) map[string]relay.Dialer {
+		host, _, _ := net.SplitHostPort(r.Server)
+		return map[string]relay.Dialer{
+			config.ModeMux:    client,
+			config.ModeTLS:    raw,
+			config.ModeDirect: tunnel.Direct{Host: host},
+		}
+	}
 	connect := func(r *config.Relay) {
 		if cancelW != nil {
 			cancelW()
@@ -116,15 +125,17 @@ func runRelay(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 			time.AfterFunc(time.Minute, old.Close)
 		}
 		client = tunnel.NewClient(r.Server, r.Fingerprint, r.Secret, r.SNI, r.Conns, log)
+		raw = tunnel.NewRawClient(r.Server, r.Fingerprint, r.Secret, r.SNI, 4, log)
 		var wctx context.Context
 		wctx, cancelW = context.WithCancel(ctx)
 		go client.Watch(wctx)
+		go raw.Watch(wctx)
 		if mgr != nil {
-			mgr.SetDialer(client)
+			mgr.SetDialers(dialers(r))
 		}
 	}
 	connect(r)
-	mgr = relay.New(client, log)
+	mgr = relay.New(dialers(r), log)
 	mgr.Apply(r.Ports)
 	lastMod = lastSeen()
 
@@ -153,7 +164,8 @@ func runRelay(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		err := ctl.Serve(ctx, func() ctl.Status {
 			mu.Lock()
 			defer mu.Unlock()
-			return ctl.Status{Role: config.RoleRelay, Version: buildinfo.Version, Started: started, Target: r.Server, Conns: client.Status(), Ports: mgr.Status()}
+			rs := raw.Status()
+			return ctl.Status{Role: config.RoleRelay, Version: buildinfo.Version, Started: started, Target: r.Server, Conns: client.Status(), Raw: &rs, Ports: mgr.Status()}
 		}, reload)
 		if err != nil {
 			log.Warn("control socket unavailable", "err", err)

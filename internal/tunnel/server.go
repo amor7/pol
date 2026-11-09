@@ -9,6 +9,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"log/slog"
@@ -51,6 +52,10 @@ type Server struct {
 	srv          *http.Server
 	dialer       net.Dialer
 	refusedNoted atomic.Int64
+	closed       atomic.Bool
+	ln           net.Listener
+	httpL        *chanListener
+	raws         map[net.Conn]struct{}
 }
 
 type relaySeen struct {
@@ -82,11 +87,61 @@ func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
 		IdleTimeout:       3 * time.Minute,
 		ErrorLog:          log.New(io.Discard, "", 0), // scanners' failed handshakes are not news
 	}
-	return s.srv.ServeTLS(l, "", "")
+	// The TLS handshake is done here rather than by the HTTP server, so the
+	// relay's ALPN can pick the mode: "h2" goes to the HTTP/2 tunnel,
+	// ProtoRaw to one-connection-per-stream. Both share the one port.
+	tlsCfg := s.srv.TLSConfig.Clone()
+	tlsCfg.NextProtos = []string{"h2", "http/1.1", ProtoRaw}
+	httpL := newChanListener(l.Addr())
+	s.mu.Lock()
+	s.ln, s.httpL = l, httpL
+	s.mu.Unlock()
+	go func() { _ = s.srv.Serve(httpL) }()
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			httpL.Close()
+			if s.closed.Load() {
+				return http.ErrServerClosed
+			}
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				continue
+			}
+			return err
+		}
+		go func() {
+			tc := tls.Server(c, tlsCfg)
+			_ = tc.SetDeadline(time.Now().Add(15 * time.Second))
+			if err := tc.Handshake(); err != nil {
+				c.Close()
+				return
+			}
+			_ = tc.SetDeadline(time.Time{})
+			if tc.ConnectionState().NegotiatedProtocol == ProtoRaw {
+				s.raw(tc)
+				return
+			}
+			if !httpL.push(tc) {
+				tc.Close()
+			}
+		}()
+	}
 }
 
 // Close stops answering and drops every stream.
 func (s *Server) Close() error {
+	s.closed.Store(true)
+	s.mu.Lock()
+	ln, raws := s.ln, s.raws
+	s.raws = nil
+	s.mu.Unlock()
+	if ln != nil {
+		ln.Close()
+	}
+	for c := range raws {
+		c.Close()
+	}
 	if s.srv == nil {
 		return nil
 	}
@@ -131,23 +186,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := r.Header.Get(HeaderTarget)
-	host, port, err := net.SplitHostPort(target)
-	if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 {
-		http.Error(w, "bad target", http.StatusBadRequest)
-		return
-	}
-	if !s.AnyTarget && !loopback(host) {
-		if time.Now().Unix()-s.refusedNoted.Swap(time.Now().Unix()) > 60 {
-			s.Log.Warn("refused a target on another machine; set any_target in the config to allow it", "target", target)
-		}
-		http.Error(w, "only this machine's ports may be reached", http.StatusForbidden)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-	up, err := s.dialer.DialContext(ctx, "tcp", target)
-	cancel()
-	if err != nil {
-		http.Error(w, "nothing answers on "+target, http.StatusBadGateway)
+	up, code, msg := s.dialTarget(r.Context(), target)
+	if up == nil {
+		http.Error(w, msg, code)
 		return
 	}
 	defer up.Close()
@@ -214,6 +255,28 @@ func (s *Server) speed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// dialTarget checks and connects to what a relay asked for. On failure it
+// returns the HTTP status and a message for the relay.
+func (s *Server) dialTarget(ctx context.Context, target string) (net.Conn, int, string) {
+	host, port, err := net.SplitHostPort(target)
+	if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 {
+		return nil, http.StatusBadRequest, "bad target"
+	}
+	if !s.AnyTarget && !loopback(host) {
+		if time.Now().Unix()-s.refusedNoted.Swap(time.Now().Unix()) > 60 {
+			s.Log.Warn("refused a target on another machine; set any_target in the config to allow it", "target", target)
+		}
+		return nil, http.StatusForbidden, "only this machine's ports may be reached"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	up, err := s.dialer.DialContext(ctx, "tcp", target)
+	if err != nil {
+		return nil, http.StatusBadGateway, "nothing answers on " + target
+	}
+	return up, 0, ""
+}
+
 func loopback(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -224,6 +287,10 @@ func loopback(host string) bool {
 
 func (s *Server) seen(r *http.Request, delta int64) {
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	s.seenIP(ip, delta)
+}
+
+func (s *Server) seenIP(ip string, delta int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.relays == nil {

@@ -252,38 +252,31 @@ func (c *Client) Status() []ConnStatus {
 	return out
 }
 
-// Speed downloads mb megabytes and uploads mb megabytes through the tunnel,
-// returning bits per second each way.
-func (c *Client) Speed(ctx context.Context, mb int) (down, up float64, err error) {
-	m := c.pick()
+// SpeedDown fetches mb megabytes through the tunnel and returns the bytes.
+func (c *Client) SpeedDown(ctx context.Context, mb int) (int64, error) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+PathSpeed+"?mb="+strconv.Itoa(mb), nil)
 	req.Header.Set("Authorization", "Bearer "+c.secret)
-	start := time.Now()
-	resp, err := m.http.Do(req)
+	resp, err := c.pick().http.Do(req)
 	if err != nil {
-		return 0, 0, err
+		return 0, err
 	}
-	n, err := io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		return 0, 0, err
-	}
-	down = float64(n*8) / time.Since(start).Seconds()
+	defer resp.Body.Close()
+	return io.Copy(io.Discard, resp.Body)
+}
 
-	body := io.LimitReader(zeros{}, int64(mb)<<20)
-	req, _ = http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathSpeed, body)
+// SpeedUp sends mb megabytes through the tunnel and returns what arrived.
+func (c *Client) SpeedUp(ctx context.Context, mb int) (int64, error) {
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathSpeed, io.LimitReader(zeros{}, int64(mb)<<20))
 	req.Header.Set("Authorization", "Bearer "+c.secret)
 	req.ContentLength = int64(mb) << 20
-	start = time.Now()
-	resp, err = m.http.Do(req)
+	resp, err := c.pick().http.Do(req)
 	if err != nil {
-		return down, 0, err
+		return 0, err
 	}
+	defer resp.Body.Close()
 	var got struct{ Bytes int64 }
-	_ = json.NewDecoder(resp.Body).Decode(&got)
-	resp.Body.Close()
-	up = float64(got.Bytes*8) / time.Since(start).Seconds()
-	return down, up, nil
+	err = json.NewDecoder(resp.Body).Decode(&got)
+	return got.Bytes, err
 }
 
 type zeros struct{}

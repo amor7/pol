@@ -26,6 +26,7 @@ type rig struct {
 	t      *testing.T
 	server *tunnel.Server
 	client *tunnel.Client
+	raw    *tunnel.RawClient
 	mgr    *relay.Manager
 	addr   string
 	fp     string
@@ -47,9 +48,24 @@ func newRig(t *testing.T) *rig {
 	r := &rig{t: t, server: s, addr: l.Addr().String(), fp: certs.Fingerprint(cert)}
 	r.client = tunnel.NewClient(r.addr, r.fp, "s3cret", "example.com", 2, quiet)
 	t.Cleanup(r.client.Close)
-	r.mgr = relay.New(r.client, quiet)
+	r.raw = tunnel.NewRawClient(r.addr, r.fp, "s3cret", "example.com", 2, quiet)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go r.raw.Watch(ctx)
+	r.mgr = relay.New(map[string]relay.Dialer{
+		config.ModeMux:    r.client,
+		config.ModeTLS:    r.raw,
+		config.ModeDirect: tunnel.Direct{Host: "127.0.0.1"},
+	}, quiet)
 	t.Cleanup(r.mgr.Close)
 	return r
+}
+
+// eachMode runs fn as a subtest for every tunnel mode.
+func eachMode(t *testing.T, fn func(t *testing.T, mode string)) {
+	for _, m := range config.Modes {
+		t.Run(m, func(t *testing.T) { fn(t, m) })
+	}
 }
 
 func freePort(t *testing.T) int {
@@ -87,10 +103,10 @@ func echo(c net.Conn) { _, _ = io.Copy(c, c) }
 
 // forward makes the relay listen on a fresh port for target and waits for
 // it to open.
-func (r *rig) forward(target string) int {
+func (r *rig) forward(target, mode string) int {
 	r.t.Helper()
 	p := freePort(r.t)
-	r.mgr.Apply([]config.Forward{{Listen: p, Target: target}})
+	r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: mode}})
 	r.waitOpen(p)
 	return p
 }
@@ -134,8 +150,12 @@ func roundTrip(t *testing.T, c net.Conn, size int) {
 }
 
 func TestForwardEcho(t *testing.T) {
+	eachMode(t, testForwardEcho)
+}
+
+func testForwardEcho(t *testing.T, mode string) {
 	r := newRig(t)
-	p := r.forward(service(t, echo))
+	p := r.forward(service(t, echo), mode)
 	c := dial(t, p)
 	defer c.Close()
 	roundTrip(t, c, 10)
@@ -148,8 +168,13 @@ func TestForwardEcho(t *testing.T) {
 }
 
 func TestManyConnectionsAtOnce(t *testing.T) {
-	r := newRig(t)
-	p := r.forward(service(t, echo))
+	eachMode(t, func(t *testing.T, mode string) {
+		r := newRig(t)
+		manyAtOnce(t, r.forward(service(t, echo), mode))
+	})
+}
+
+func manyAtOnce(t *testing.T, p int) {
 	var wg sync.WaitGroup
 	for range 60 {
 		wg.Add(1)
@@ -164,6 +189,10 @@ func TestManyConnectionsAtOnce(t *testing.T) {
 }
 
 func TestLargeDownloadAndHalfClose(t *testing.T) {
+	eachMode(t, testLargeDownload)
+}
+
+func testLargeDownload(t *testing.T, mode string) {
 	r := newRig(t)
 	const size = 48 << 20
 	// The service reads the whole request, then answers; the user closes
@@ -175,7 +204,7 @@ func TestLargeDownloadAndHalfClose(t *testing.T) {
 		}
 		_, _ = io.CopyN(c, zeroReader{}, size)
 	})
-	p := r.forward(target)
+	p := r.forward(target, mode)
 	c := dial(t, p).(*net.TCPConn)
 	defer c.Close()
 	_, _ = c.Write([]byte("hello"))
@@ -196,19 +225,19 @@ func TestStalledUserDoesNotBlockOthers(t *testing.T) {
 	// would simply land on the other one and the test would prove nothing.
 	one := tunnel.NewClient(r.addr, r.fp, "s3cret", "example.com", 1, quiet)
 	t.Cleanup(one.Close)
-	r.mgr.SetDialer(one)
+	r.mgr.SetDialers(map[string]relay.Dialer{config.ModeMux: one})
 
 	release := make(chan struct{})
 	defer close(release)
 	sink := service(t, func(c net.Conn) { <-release }) // accepts, never reads
-	stuckPort := r.forward(sink)
+	stuckPort := r.forward(sink, config.ModeMux)
 	stuck := dial(t, stuckPort)
 	defer stuck.Close()
 	go func() { _, _ = io.CopyN(stuck, zeroReader{}, 256<<20) }()
 	time.Sleep(time.Second) // let the upload pile up in the tunnel
 
 	p := freePort(t)
-	r.mgr.Apply([]config.Forward{{Listen: stuckPort, Target: sink}, {Listen: p, Target: service(t, echo)}})
+	r.mgr.Apply([]config.Forward{{Listen: stuckPort, Target: sink, Mode: config.ModeMux}, {Listen: p, Target: service(t, echo), Mode: config.ModeMux}})
 	r.waitOpen(p)
 	done := make(chan struct{})
 	go func() {
@@ -229,7 +258,7 @@ func TestStalledUserDoesNotBlockOthers(t *testing.T) {
 func TestPortsComeAndGo(t *testing.T) {
 	r := newRig(t)
 	target := service(t, echo)
-	p := r.forward(target)
+	p := r.forward(target, config.ModeTLS)
 	c := dial(t, p)
 	roundTrip(t, c, 100)
 
@@ -250,6 +279,32 @@ func TestPortsComeAndGo(t *testing.T) {
 	c = dial(t, p)
 	defer c.Close()
 	roundTrip(t, c, 100)
+}
+
+// Changing a port's mode takes effect for the next connection; the one
+// already open carries on.
+func TestModeSwitch(t *testing.T) {
+	r := newRig(t)
+	target := service(t, echo)
+	p := freePort(t)
+	r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: config.ModeMux}})
+	r.waitOpen(p)
+	before := dial(t, p)
+	defer before.Close()
+	roundTrip(t, before, 100)
+	muxOpen := r.client.Status()[0].Open + r.client.Status()[1].Open
+
+	r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: config.ModeTLS}})
+	after := dial(t, p)
+	defer after.Close()
+	roundTrip(t, after, 100)
+	roundTrip(t, before, 100)
+	if st := r.mgr.Status()[0]; st.Mode != config.ModeTLS {
+		t.Fatalf("mode = %q", st.Mode)
+	}
+	if r.raw.Status().Open != 1 || muxOpen != 1 {
+		t.Fatalf("open: tls %d, mux %d", r.raw.Status().Open, muxOpen)
+	}
 }
 
 // A port held by something else at start is taken once it is let go.
@@ -289,11 +344,18 @@ func TestWrongSecretAndForeignTargets(t *testing.T) {
 		t.Fatal("wrong secret pinged")
 	}
 
-	if _, err := r.client.Dial("10.255.255.1:80"); !errors.Is(err, tunnel.ErrRejected) {
-		t.Fatalf("another machine's port: err = %v", err)
+	badRaw := tunnel.NewRawClient(r.addr, r.fp, "wrong", "example.com", 0, quiet)
+	if _, err := badRaw.Dial("127.0.0.1:1"); err == nil || errors.Is(err, tunnel.ErrRejected) {
+		t.Fatalf("wrong secret, tls mode: err = %v", err)
 	}
-	if _, err := r.client.Dial("127.0.0.1:" + strconv.Itoa(freePort(t))); !errors.Is(err, tunnel.ErrRejected) {
-		t.Fatalf("closed local port: err = %v", err)
+
+	for name, d := range map[string]relay.Dialer{"mux": r.client, "tls": r.raw} {
+		if _, err := d.Dial("10.255.255.1:80"); !errors.Is(err, tunnel.ErrRejected) {
+			t.Fatalf("%s: another machine's port: err = %v", name, err)
+		}
+		if _, err := d.Dial("127.0.0.1:" + strconv.Itoa(freePort(t))); !errors.Is(err, tunnel.ErrRejected) {
+			t.Fatalf("%s: closed local port: err = %v", name, err)
+		}
 	}
 
 	// The wrong certificate is refused outright.
@@ -310,9 +372,19 @@ func TestPingAndSpeed(t *testing.T) {
 	if _, err := r.client.Ping(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	down, up, err := r.client.Speed(context.Background(), 4)
-	if err != nil || down <= 0 || up <= 0 {
-		t.Fatalf("speed: %v %v %v", down, up, err)
+	ctx := context.Background()
+	for name, c := range map[string]interface {
+		SpeedDown(context.Context, int) (int64, error)
+		SpeedUp(context.Context, int) (int64, error)
+	}{"mux": r.client, "tls": r.raw} {
+		down, err := c.SpeedDown(ctx, 3)
+		if err != nil || down != 3<<20 {
+			t.Fatalf("%s download: %d, %v", name, down, err)
+		}
+		up, err := c.SpeedUp(ctx, 3)
+		if err != nil || up != 3<<20 {
+			t.Fatalf("%s upload: %d, %v", name, up, err)
+		}
 	}
 }
 

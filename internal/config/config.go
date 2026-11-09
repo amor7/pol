@@ -54,6 +54,45 @@ type Relay struct {
 type Forward struct {
 	Listen int    `json:"listen"`
 	Target string `json:"target"` // host:port as the server sees it
+	Mode   string `json:"mode,omitempty"`
+}
+
+// Tunnel modes, chosen per port.
+const (
+	// ModeMux carries every connection as a stream inside a few HTTP/2
+	// connections: one HTTPS session from outside, the most discreet.
+	ModeMux = "mux"
+	// ModeTLS gives every connection its own TLS connection: still
+	// encrypted, and much faster on lossy or per-connection-throttled paths.
+	ModeTLS = "tls"
+	// ModeDirect connects straight to the port on the server with plain
+	// TCP: nothing added, fastest, and the service's own encryption is all
+	// there is. The port has to be reachable from the relay.
+	ModeDirect = "direct"
+)
+
+// Modes lists the modes in the order menus show them.
+var Modes = []string{ModeTLS, ModeMux, ModeDirect}
+
+// DefaultMode is what `pol add` uses when no mode is given.
+const DefaultMode = ModeTLS
+
+// ModeOf is the forward's mode; ports saved before modes existed are mux.
+func (f Forward) ModeOf() string {
+	if f.Mode == "" {
+		return ModeMux
+	}
+	return f.Mode
+}
+
+// ValidMode reports whether m names a mode.
+func ValidMode(m string) bool {
+	for _, x := range Modes {
+		if x == m {
+			return true
+		}
+	}
+	return false
 }
 
 // Load reads the file at path.

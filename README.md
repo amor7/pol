@@ -43,26 +43,44 @@ For x-ui and similar panels: keep the inbound as it is and, in the client config
 
 Without arguments the installer asks which server it is on. Run it again later, without arguments, to update.
 
+## Tunnel modes
+
+Each port picks how its connections travel, and different ports can use different modes:
+
+| Mode | How | When |
+|---|---|---|
+| **tls** (default) | every user connection gets its own TLS connection to the server, from a pool kept ready so nobody waits for the handshake | the usual choice: encrypted, and fast on lossy paths and on networks that slow each connection down |
+| **mux** | every user connection is a stream inside a few HTTP/2 connections | the most discreet: from outside it is one HTTPS session; slower when the path loses packets |
+| **direct** | plain TCP straight to the port on the server, no pol in between | the fastest; nothing is added, so the service's own encryption (Reality, TLS) is all there is, and the port must be reachable from the relay |
+
+`pol speedtest` measures tls and mux side by side, four connections at a time as a phone would open, so you can see which suits your path. Both modes share the one tunnel port on the server; direct uses the service's own port.
+
+```bash
+pol add 2088 --mode tls      # new ports are tls unless you say otherwise
+pol mode 2088 mux            # change a port's mode; open connections finish as they are
+```
+
 ## Commands
 
 Type **`pol`** on either server for a menu of everything below, by number:
 
 ```
-   pol v1.1.0  relay · running
+   pol v1.2.0  relay · running
 
     1) Status
     2) Add ports
     3) Remove ports
     4) List ports
-    5) Ping through the tunnel
-    6) Speed test
-    7) Logs (live - Ctrl+C to stop)
-    8) Restart
-    9) Stop
-   10) Speed up the network (BBR)
-   11) Update pol
-   12) Set up again
-   13) Uninstall
+    5) Change the tunnel mode of ports
+    6) Ping through the tunnel
+    7) Speed test (compares the modes)
+    8) Logs (live - Ctrl+C to stop)
+    9) Restart
+   10) Stop
+   11) Speed up the network (BBR)
+   12) Update pol
+   13) Set up again
+   14) Uninstall
     0) Exit
 ```
 
@@ -76,10 +94,12 @@ On the **relay** (Iran):
 | `pol add 2088:443` | forward port 2088 here to port 443 on the server |
 | `pol add 2080-2085` | forward a range, each port to the same port |
 | `pol add 2088 8443 2096` | several at once (commas work too) |
+| `pol add 2088 --mode mux` | choose the tunnel mode (`tls`, `mux`, `direct`) |
+| `pol mode 2088 tls` | change the mode of ports already forwarded |
 | `pol del 2088` | stop forwarding (also `rm`; ranges work) |
 | `pol list` | the forwarded ports, with live connections and traffic |
 | `pol ping` | round-trip time through the tunnel |
-| `pol speedtest [MB]` | tunnel speed in both directions |
+| `pol speedtest [MB]` | speed of the tls and mux modes, both directions |
 
 On the **server** (abroad):
 
@@ -137,7 +157,9 @@ Later updates the same way: `pol update --file pol-linux-amd64`.
 
 ## How it works
 
-The relay keeps a few HTTP/2 connections over TLS 1.3 open to the server. Every user connection becomes one `POST` stream on one of them. The request body carries what the user sends, the response body what comes back. The server checks the secret, connects to the requested port on itself, and copies both ways. Streams are independent: each gets a 4 MB window and the connection 256 MB, so a user who stops reading only stops their own stream. Both ends ping every 15-20 seconds; a connection that stops answering is replaced, and new streams go to the least busy healthy one.
+In **mux** mode the relay keeps a few HTTP/2 connections over TLS 1.3 open to the server, and every user connection becomes one `POST` stream on one of them. The request body carries what the user sends, the response body what comes back. The server checks the secret, connects to the requested port on itself, and copies both ways. Streams are independent: each gets a 4 MB window and the connection 256 MB, so a user who stops reading only stops their own stream. Both ends ping every 15-20 seconds; a connection that stops answering is replaced, and new streams go to the least busy healthy one.
+
+In **tls** mode the relay negotiates a different ALPN on the same port, sends one line naming the secret and the target, gets one byte back, and from then on the connection carries the user's bytes and nothing else. A few such connections are kept handshaken in advance and replaced before the server would time them out.
 
 ## Building
 

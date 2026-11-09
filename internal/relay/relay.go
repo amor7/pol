@@ -29,37 +29,40 @@ const retryEvery = 5 * time.Second
 // Manager keeps one listener per forward and follows the configuration as
 // ports are added and removed.
 type Manager struct {
-	log    *slog.Logger
-	mu     sync.Mutex
-	dialer Dialer
-	ports  map[int]*port
+	log     *slog.Logger
+	mu      sync.Mutex
+	dialers map[string]Dialer // by mode
+	ports   map[int]*port
 }
 
-func New(d Dialer, log *slog.Logger) *Manager {
-	return &Manager{dialer: d, log: log, ports: map[int]*port{}}
+func New(dialers map[string]Dialer, log *slog.Logger) *Manager {
+	return &Manager{dialers: dialers, log: log, ports: map[int]*port{}}
 }
 
-// SetDialer switches to a new tunnel (after the server or token changed);
-// connections already open stay on the old one until they end.
-func (m *Manager) SetDialer(d Dialer) {
+// SetDialers switches to new tunnels (after the server or token changed);
+// connections already open stay on the old ones until they end.
+func (m *Manager) SetDialers(d map[string]Dialer) {
 	m.mu.Lock()
-	m.dialer = d
+	m.dialers = d
 	m.mu.Unlock()
 }
 
-func (m *Manager) currentDialer() Dialer {
+func (m *Manager) dialer(mode string) Dialer {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.dialer
+	if d, ok := m.dialers[mode]; ok {
+		return d
+	}
+	return m.dialers[config.ModeMux]
 }
 
 // Apply opens what is new, closes what is gone, and retargets what moved.
 func (m *Manager) Apply(fs []config.Forward) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	want := map[int]string{}
+	want := map[int]config.Forward{}
 	for _, f := range fs {
-		want[f.Listen] = f.Target
+		want[f.Listen] = f
 	}
 	for n, p := range m.ports {
 		if _, ok := want[n]; !ok {
@@ -68,16 +71,18 @@ func (m *Manager) Apply(fs []config.Forward) {
 			m.log.Info("port closed", "port", n)
 		}
 	}
-	for n, target := range want {
+	for n, f := range want {
 		if p, ok := m.ports[n]; ok {
-			if p.target.Load().(string) != target {
-				p.target.Store(target)
-				m.log.Info("port retargeted", "port", n, "target", target)
+			if p.target.Load().(string) != f.Target || p.mode.Load().(string) != f.ModeOf() {
+				p.target.Store(f.Target)
+				p.mode.Store(f.ModeOf())
+				m.log.Info("port changed", "port", n, "target", f.Target, "mode", f.ModeOf())
 			}
 			continue
 		}
 		p := &port{m: m, n: n, quit: make(chan struct{}), conns: map[net.Conn]struct{}{}}
-		p.target.Store(target)
+		p.target.Store(f.Target)
+		p.mode.Store(f.ModeOf())
 		p.err.Store("")
 		m.ports[n] = p
 		go p.run()
@@ -93,6 +98,7 @@ type port struct {
 	m      *Manager
 	n      int
 	target atomic.Value // string
+	mode   atomic.Value // string
 	err    atomic.Value // string: why the port is not open, if it is not
 	open   atomic.Bool  // listening
 	quit   chan struct{}
@@ -132,7 +138,7 @@ func (p *port) run() {
 		p.mu.Unlock()
 		p.err.Store("")
 		p.open.Store(true)
-		p.m.log.Info("port open", "port", p.n, "target", p.target.Load())
+		p.m.log.Info("port open", "port", p.n, "target", p.target.Load(), "mode", p.mode.Load())
 		for {
 			c, err := ln.Accept()
 			if err != nil {
@@ -198,12 +204,12 @@ func (p *port) handle(c net.Conn) {
 		_ = tc.SetKeepAlive(true)
 		_ = tc.SetKeepAlivePeriod(30 * time.Second)
 	}
-	target := p.target.Load().(string)
-	up, err := p.m.currentDialer().Dial(target)
+	target, mode := p.target.Load().(string), p.mode.Load().(string)
+	up, err := p.m.dialer(mode).Dial(target)
 	if err != nil {
 		// One line a minute is enough to say what is wrong.
 		if now := time.Now().Unix(); now-lastDialWarn.Swap(now) > 60 {
-			p.m.log.Warn("could not reach the target through the tunnel", "port", p.n, "target", target, "err", err)
+			p.m.log.Warn("could not reach the target", "port", p.n, "target", target, "mode", mode, "err", err)
 		}
 		return
 	}
@@ -252,6 +258,7 @@ func (c counter) Write(b []byte) (int, error) {
 type PortStatus struct {
 	Listen int    `json:"listen"`
 	Target string `json:"target"`
+	Mode   string `json:"mode"`
 	Open   bool   `json:"open"`
 	Err    string `json:"err,omitempty"`
 	Active int64  `json:"active"`
@@ -265,7 +272,7 @@ func (m *Manager) Status() []PortStatus {
 	out := make([]PortStatus, 0, len(m.ports))
 	for n, p := range m.ports {
 		out = append(out, PortStatus{
-			Listen: n, Target: p.target.Load().(string), Open: p.open.Load(), Err: p.err.Load().(string),
+			Listen: n, Target: p.target.Load().(string), Mode: p.mode.Load().(string), Open: p.open.Load(), Err: p.err.Load().(string),
 			Active: p.active.Load(), Total: p.total.Load(), Up: p.up.Load(), Down: p.down.Load(),
 		})
 	}

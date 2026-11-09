@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/amor7/pol/internal/buildinfo"
@@ -67,7 +68,17 @@ func cmdStatus(path string) error {
 				state += dim("  " + shorten(c.Err, 60))
 			}
 		}
-		lines = append(lines, fmt.Sprintf("tunnel %d %s", i+1, state))
+		lines = append(lines, fmt.Sprintf("mux %d    %s", i+1, state))
+	}
+	if t := st.Raw; t != nil {
+		state := green("up") + dim(fmt.Sprintf("  %.0f ms handshake, %d open, %d ready", t.RTTms, t.Open, t.Warm))
+		if !t.Up {
+			state = red("down")
+			if t.Err != "" {
+				state += dim("  " + shorten(t.Err, 60))
+			}
+		}
+		lines = append(lines, "tls      "+state)
 	}
 	box("pol relay", lines)
 	live := map[int]relay.PortStatus{}
@@ -144,31 +155,100 @@ func cmdPing(path string) error {
 	return nil
 }
 
+// speedStreams is how many connections each mode's test runs at once. A
+// phone or a speed test app opens several; one would hide what sets the
+// modes apart.
+const speedStreams = 4
+
 func cmdSpeed(path string, a []string) error {
+	o := parseOpts(a)
 	mb := 20
-	if len(a) > 0 {
-		n, err := strconv.Atoi(a[0])
+	if len(o.pos) > 0 {
+		n, err := strconv.Atoi(o.pos[0])
 		if err != nil || n < 1 || n > 200 {
 			return errors.New("give a size from 1 to 200 MB")
 		}
 		mb = n
 	}
-	c, r, err := relayClient(path)
+	modes := []string{config.ModeTLS, config.ModeMux}
+	if m := o.flags["mode"]; m != "" {
+		if m != config.ModeTLS && m != config.ModeMux {
+			return errors.New("the speed test measures the tls and mux modes (direct mode goes straight to your service)")
+		}
+		modes = []string{m}
+	}
+	cfg, err := loadRelay(path)
 	if err != nil {
 		return err
 	}
-	defer c.Close()
+	r := cfg.Relay
 	fmt.Println()
-	info("moving %d MB each way through the tunnel to %s ...", mb, r.Server)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-	down, up, err := c.Speed(ctx, mb)
-	if err != nil {
-		return err
+	info("%d MB each way, %d connections at once, to %s", mb, speedStreams, r.Server)
+	fmt.Println()
+	fmt.Printf("   %s\n", dim(fmt.Sprintf("%-8s %16s %16s", "MODE", "DOWNLOAD", "UPLOAD")))
+	per := max(1, mb/speedStreams)
+	for _, mode := range modes {
+		var down, up func(context.Context, int) (int64, error)
+		switch mode {
+		case config.ModeMux:
+			c := tunnel.NewClient(r.Server, r.Fingerprint, r.Secret, r.SNI, r.Conns, quietLog())
+			defer c.Close()
+			down, up = c.SpeedDown, c.SpeedUp
+		default:
+			c := tunnel.NewRawClient(r.Server, r.Fingerprint, r.Secret, r.SNI, 0, quietLog())
+			down, up = c.SpeedDown, c.SpeedUp
+		}
+		d, err1 := parallel(down, per)
+		u, err2 := parallel(up, per)
+		cell := func(v float64, err error) string {
+			if err != nil {
+				return red(fmt.Sprintf("%16s", "failed"))
+			}
+			return bold(fmt.Sprintf("%16s", mbit(v)))
+		}
+		fmt.Printf("   %-8s %s %s\n", mode, cell(d, err1), cell(u, err2))
+		for _, err := range []error{err1, err2} {
+			if err != nil {
+				warnf("%s: %v", mode, err)
+				break
+			}
+		}
 	}
-	okf("download (server → relay)  %s", bold(mbit(down)))
-	okf("upload   (relay → server)  %s", bold(mbit(up)))
+	fmt.Println()
+	info("direct mode is not measured here: it goes straight to your service, with nothing of pol's in between.")
 	return nil
+}
+
+// parallel runs f on speedStreams connections at once and returns the
+// combined rate in bits per second.
+func parallel(f func(context.Context, int) (int64, error), mb int) (float64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		total int64
+		first error
+	)
+	start := time.Now()
+	for range speedStreams {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			n, err := f(ctx, mb)
+			mu.Lock()
+			total += n
+			if err != nil && first == nil {
+				first = err
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if first != nil {
+		return 0, first
+	}
+	return float64(total*8) / time.Since(start).Seconds(), nil
 }
 
 // ---------------------------------------------------------------- token

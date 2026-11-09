@@ -37,6 +37,7 @@ type Status struct {
 	// relay
 	Target string              `json:"target,omitempty"` // the server it tunnels to
 	Conns  []tunnel.ConnStatus `json:"conns,omitempty"`
+	Raw    *tunnel.RawStatus   `json:"raw,omitempty"`
 	Ports  []relay.PortStatus  `json:"ports,omitempty"`
 }
 

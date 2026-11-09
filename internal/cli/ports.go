@@ -26,14 +26,19 @@ func cmdAdd(path string, a []string) error {
 	if err := requireRoot(); err != nil {
 		return err
 	}
-	if len(a) == 0 {
-		return errors.New("usage: pol add <port>...   e.g. pol add 2088   pol add 2088:443   pol add 2080-2085")
+	o := parseOpts(a)
+	if len(o.pos) == 0 {
+		return errors.New("usage: pol add <port>... [--mode tls|mux|direct]   e.g. pol add 2088   pol add 2088:443   pol add 2080-2085")
+	}
+	mode := o.flags["mode"]
+	if mode != "" && !config.ValidMode(mode) {
+		return fmt.Errorf("unknown mode %q - use %s", mode, strings.Join(config.Modes, ", "))
 	}
 	cfg, err := loadRelay(path)
 	if err != nil {
 		return err
 	}
-	fs, err := config.ParseForwards(a)
+	fs, err := config.ParseForwards(o.pos)
 	if err != nil {
 		return err
 	}
@@ -41,13 +46,21 @@ func cmdAdd(path string, a []string) error {
 	var added []int
 	for _, f := range fs {
 		if i, ok := r.Port(f.Listen); ok {
-			if r.Ports[i].Target == f.Target {
-				info("port %d already forwards to %s", f.Listen, f.Target)
-				continue
+			old := r.Ports[i]
+			if mode != "" {
+				r.Ports[i].Mode = mode
 			}
 			r.Ports[i].Target = f.Target
-			okf("port %d now forwards to %s", f.Listen, f.Target)
+			if r.Ports[i] == old {
+				info("port %d already forwards to %s (%s)", f.Listen, f.Target, old.ModeOf())
+				continue
+			}
+			okf("port %d now forwards to %s (%s)", f.Listen, f.Target, r.Ports[i].ModeOf())
 			continue
+		}
+		f.Mode = mode
+		if f.Mode == "" {
+			f.Mode = config.DefaultMode
 		}
 		if !portFree(f.Listen) {
 			who := whoHolds(f.Listen)
@@ -155,7 +168,7 @@ func showPorts(ports []int) {
 		}
 		switch {
 		case p.Open:
-			okf("port %d is open → %s", p.Listen, p.Target)
+			okf("port %d is open → %s %s", p.Listen, p.Target, dim("("+p.Mode+" mode)"))
 		case p.Err != "":
 			warnf("port %d is not open yet: %s", p.Listen, p.Err)
 		default:
@@ -193,7 +206,7 @@ func cmdList(path string) error {
 
 func portTable(fs []config.Forward, live map[int]relay.PortStatus) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "   %s\n", dim(fmt.Sprintf("%-7s %-22s %-10s %7s %7s %11s %11s", "PORT", "TARGET", "STATE", "OPEN", "TOTAL", "UP", "DOWN")))
+	fmt.Fprintf(&b, "   %s\n", dim(fmt.Sprintf("%-7s %-22s %-7s %-10s %7s %7s %11s %11s", "PORT", "TARGET", "MODE", "STATE", "OPEN", "TOTAL", "UP", "DOWN")))
 	for _, f := range fs {
 		p, ok := live[f.Listen]
 		state := dim("stopped")
@@ -205,10 +218,56 @@ func portTable(fs []config.Forward, live map[int]relay.PortStatus) string {
 		case ok:
 			state = yellow("opening")
 		}
-		fmt.Fprintf(&b, "   %-7d %-22s %-10s %7d %7d %11s %11s\n", f.Listen, f.Target, state+strings.Repeat(" ", max(0, 10-visible(state))), p.Active, p.Total, human(p.Up), human(p.Down))
+		fmt.Fprintf(&b, "   %-7d %-22s %-7s %s %7d %7d %11s %11s\n", f.Listen, f.Target, f.ModeOf(), state+strings.Repeat(" ", max(0, 10-visible(state))), p.Active, p.Total, human(p.Up), human(p.Down))
 		if ok && p.Err != "" {
 			fmt.Fprintf(&b, "   %s\n", yellow("        ↳ "+p.Err))
 		}
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// cmdMode changes the tunnel mode of ports already forwarded:
+// pol mode 2088 8443 tls
+func cmdMode(path string, a []string) error {
+	if err := requireRoot(); err != nil {
+		return err
+	}
+	if len(a) < 2 || !config.ValidMode(a[len(a)-1]) {
+		return fmt.Errorf("usage: pol mode <port>... <%s>", strings.Join(config.Modes, "|"))
+	}
+	mode := a[len(a)-1]
+	cfg, err := loadRelay(path)
+	if err != nil {
+		return err
+	}
+	fs, err := config.ParseForwards(a[:len(a)-1])
+	if err != nil {
+		return err
+	}
+	r := cfg.Relay
+	var changed []int
+	for _, f := range fs {
+		i, ok := r.Port(f.Listen)
+		if !ok {
+			warnf("port %d is not forwarded - add it with `pol add %d --mode %s`", f.Listen, f.Listen, mode)
+			continue
+		}
+		if r.Ports[i].ModeOf() == mode {
+			info("port %d is already in %s mode", f.Listen, mode)
+			continue
+		}
+		r.Ports[i].Mode = mode
+		changed = append(changed, f.Listen)
+	}
+	if len(changed) == 0 {
+		return nil
+	}
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	if err := apply(); err != nil {
+		return err
+	}
+	okf("%s now in %s mode - new connections use it; open ones finish as they are", joinInts(changed), bold(mode))
+	return nil
 }

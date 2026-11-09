@@ -57,6 +57,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/amor7/pol/main/install.sh) r
 
 اگر نصب را بدون آرگومان بزنید، می‌پرسد روی کدام سرور هستید. بعداً برای آپدیت، همان دستور نصب را بدون آرگومان دوباره بزنید.
 
+## حالت‌های تونل
+
+هر پورت می‌تواند حالت خودش را داشته باشد و پورت‌های مختلف می‌توانند حالت‌های متفاوتی داشته باشند:
+
+| حالت | چطور کار می‌کند | کی استفاده کنیم |
+|---|---|---|
+| **tls** (پیش‌فرض) | هر اتصال کاربر یک اتصال TLS جدا به سرور دارد. چند اتصال از قبل آماده نگه داشته می‌شود تا کاربر منتظر نماند | انتخاب معمول: رمزگذاری‌شده و سریع، مخصوصاً روی مسیرهای پرافت و اینترنت‌هایی که سرعت هر اتصال را جدا محدود می‌کنند |
+| **mux** | همهٔ اتصال‌ها داخل چند اتصال HTTP/2 | پنهان‌ترین حالت: از بیرون فقط یک اتصال HTTPS دیده می‌شود. روی مسیرهای پرافت کندتر است |
+| **direct** | TCP ساده، مستقیم به پورت سرور خارج، بدون پل در وسط | سریع‌ترین. چیزی اضافه نمی‌کند، پس فقط رمزگذاری خود سرویس (Reality یا TLS) هست، و پورت باید از سرور ایران در دسترس باشد |
+
+`pol speedtest` سرعت tls و mux را کنار هم می‌سنجد، با چهار اتصال هم‌زمان مثل یک گوشی، تا ببینید کدام برای مسیر شما بهتر است. tls و mux هر دو از همان یک پورت تونل استفاده می‌کنند و direct از پورت خود سرویس.
+
+</div>
+
+```bash
+pol add 2088 --mode tls      # پورت‌های جدید پیش‌فرض tls هستند
+pol mode 2088 mux            # عوض کردن حالت؛ اتصال‌های باز همان‌طور ادامه می‌دهند
+```
+
+<div dir="rtl">
+
 ## دستورها
 
 روی هر کدام از دو سرور، فقط **`pol`** را بزنید تا منوی شماره‌دار باز شود و همهٔ کارهای زیر را از آنجا انجام دهید:
@@ -64,21 +85,22 @@ bash <(curl -fsSL https://raw.githubusercontent.com/amor7/pol/main/install.sh) r
 </div>
 
 ```
-   pol v1.1.0  relay · running
+   pol v1.2.0  relay · running
 
     1) Status
     2) Add ports
     3) Remove ports
     4) List ports
-    5) Ping through the tunnel
-    6) Speed test
-    7) Logs (live - Ctrl+C to stop)
-    8) Restart
-    9) Stop
-   10) Speed up the network (BBR)
-   11) Update pol
-   12) Set up again
-   13) Uninstall
+    5) Change the tunnel mode of ports
+    6) Ping through the tunnel
+    7) Speed test (compares the modes)
+    8) Logs (live - Ctrl+C to stop)
+    9) Restart
+   10) Stop
+   11) Speed up the network (BBR)
+   12) Update pol
+   13) Set up again
+   14) Uninstall
     0) Exit
 ```
 
@@ -94,10 +116,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/amor7/pol/main/install.sh) r
 | `pol add 2088:443` | پورت 2088 اینجا را به پورت 443 سرور خارج منتقل می‌کند |
 | `pol add 2080-2085` | یک بازه پورت، هر کدام به همان پورت |
 | `pol add 2088 8443 2096` | چند پورت با هم (با کاما هم می‌شود) |
+| `pol add 2088 --mode mux` | انتخاب حالت تونل (`tls`، `mux`، `direct`) |
+| `pol mode 2088 tls` | عوض کردن حالت پورت‌های موجود |
 | `pol del 2088` | حذف پورت (یا `rm`؛ بازه هم قبول می‌کند) |
 | `pol list` | لیست پورت‌ها با اتصال‌های فعال و ترافیک |
 | `pol ping` | زمان رفت‌وبرگشت از داخل تونل |
-| `pol speedtest [MB]` | سرعت تونل در هر دو جهت |
+| `pol speedtest [MB]` | مقایسهٔ سرعت حالت‌های tls و mux در هر دو جهت |
 
 روی **سرور خارج** (server):
 

@@ -223,12 +223,20 @@ func setupRelay(path string, old *config.Config, o opts) error {
 	if spec == "" && interactive {
 		spec = ask("Ports to forward (e.g. 2088 or 2088,8443 - empty for none yet):", "")
 	}
+	mode := o.flags["mode"]
+	if mode == "" {
+		mode = config.DefaultMode
+	}
+	if !config.ValidMode(mode) {
+		return fmt.Errorf("unknown mode %q - use %s", mode, strings.Join(config.Modes, ", "))
+	}
 	if spec != "" {
 		fs, err := config.ParseForwards([]string{spec})
 		if err != nil {
 			return err
 		}
 		for _, f := range fs {
+			f.Mode = mode
 			if i, ok := r.Port(f.Listen); ok {
 				r.Ports[i] = f
 			} else {
@@ -280,7 +288,7 @@ func setupRelay(path string, old *config.Config, o opts) error {
 	} else {
 		lines = append(lines, bold("Forwarded ports"))
 		for _, f := range r.Ports {
-			lines = append(lines, fmt.Sprintf("  %-6d → %s", f.Listen, f.Target))
+			lines = append(lines, fmt.Sprintf("  %-6d → %s  %s", f.Listen, f.Target, dim(f.ModeOf()+" mode")))
 		}
 		lines = append(lines, "", dim("Point your clients at this server's IP with the same ports."))
 	}

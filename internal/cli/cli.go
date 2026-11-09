@@ -26,14 +26,20 @@ Setting up
                             set up the relay in Iran with the token the server printed
 
 Ports (on the relay)
-  add <port>...             forward ports:  2088   2088:443   2080-2085   2088:10.0.0.5:443
+  add <port>... [--mode M]  forward ports:  2088   2088:443   2080-2085   2088:10.0.0.5:443
   del <port>...             stop forwarding ports (also: rm, remove)
+  mode <port>... <M>        change the tunnel mode of forwarded ports
   list                      the forwarded ports (also: ports, ls)
+
+Tunnel modes (M), chosen per port
+  tls      a TLS connection per user connection - encrypted and fast (default)
+  mux      all connections inside a few HTTP/2 connections - the most discreet
+  direct   plain TCP straight to the port abroad - fastest, nothing added
 
 Everyday
   status                    what is connected and how much has gone through
   ping                      round-trip time through the tunnel (relay)
-  speedtest [MB]            tunnel speed both ways (relay, default 20 MB)
+  speedtest [MB]            speed of each mode, both ways (relay, default 20 MB)
   token [--new]             print the join token; --new replaces the secret (server)
   logs [-f] [-e]            service logs (-f follow, -e warnings and errors only)
   restart | start | stop    control the service
@@ -75,6 +81,8 @@ func Main(args []string) int {
 		err = cmdAdd(*cfgPath, a)
 	case "del", "rm", "remove", "delete":
 		err = cmdDel(*cfgPath, a)
+	case "mode":
+		err = cmdMode(*cfgPath, a)
 	case "list", "ls", "ports":
 		err = cmdList(*cfgPath)
 	case "status":
