@@ -91,7 +91,8 @@ func (m *Manager) Apply(fs []config.Forward) {
 			if p.target.Load().(string) != f.Target || p.mode.Load().(string) != f.ModeOf() {
 				p.target.Store(f.Target)
 				p.mode.Store(f.ModeOf())
-				m.log.Info("port changed", "port", k, "target", f.Target, "mode", f.ModeOf())
+				n := p.cut()
+				m.log.Info("port changed", "port", k, "target", f.Target, "mode", f.ModeOf(), "reconnected", n)
 			}
 			continue
 		}
@@ -215,6 +216,18 @@ func (p *port) stop() {
 		p.mu.Unlock()
 		p.open.Store(false)
 	})
+}
+
+// cut closes every connection open on the port, so clients reconnect at
+// once - through the new mode, when the mode is what changed - instead of
+// staying on the old one for as long as they keep the connection.
+func (p *port) cut() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for c := range p.conns {
+		c.Close()
+	}
+	return len(p.conns)
 }
 
 func (p *port) track(c io.Closer, add bool) bool {
@@ -400,11 +413,16 @@ func (p *port) openSession(pc net.PacketConn, from net.Addr, gone func(*session)
 		return nil, err
 	}
 	s.last.Store(time.Now().Unix())
+	if !p.track(s.up, true) {
+		s.up.Close()
+		return nil, net.ErrClosed
+	}
 	p.total.Add(1)
 	p.active.Add(1)
 	go func() {
 		defer func() {
 			p.active.Add(-1)
+			p.track(s.up, false)
 			s.up.Close()
 			gone(s)
 		}()

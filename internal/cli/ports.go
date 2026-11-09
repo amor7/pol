@@ -222,7 +222,7 @@ func cmdMode(path string, a []string) error {
 	if err := apply(); err != nil {
 		return err
 	}
-	okf("%s now in %s mode - new connections use it; open ones finish as they are", strings.Join(changed, ", "), bold(mode))
+	okf("%s now in %s mode - its users were reconnected through it at once", strings.Join(changed, ", "), bold(mode))
 	modeHints(cfg, mode)
 	return nil
 }

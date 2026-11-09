@@ -414,28 +414,82 @@ func TestPortsComeAndGo(t *testing.T) {
 	roundTrip(t, c, 100)
 }
 
-// Changing a port's mode takes effect for the next connection; the one
-// already open carries on.
-func TestModeSwitch(t *testing.T) {
+// Changing a port's mode cuts its open connections, so clients reconnect
+// through the new mode at once; other ports are left alone.
+func TestModeSwitchReconnectsAtOnce(t *testing.T) {
 	r := newRig(t)
 	target := service(t, echo)
-	p := freePort(t)
-	r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: config.ModeMux}})
+	p, other := freePort(t), freePort(t)
+	fs := []config.Forward{{Listen: p, Target: target, Mode: config.ModeMux}, {Listen: other, Target: target, Mode: config.ModeTLS}}
+	r.mgr.Apply(fs)
 	r.waitOpen(p)
+	r.waitOpen(other)
 	before := dial(t, p)
 	defer before.Close()
 	roundTrip(t, before, 100)
+	bystander := dial(t, other)
+	defer bystander.Close()
+	roundTrip(t, bystander, 100)
 
-	r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: config.ModeQUIC}})
+	fs[0].Mode = config.ModeQUIC
+	r.mgr.Apply(fs)
+	_ = before.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := before.Read(make([]byte, 1)); err == nil {
+		t.Fatal("the open connection stayed on the old mode")
+	}
+	roundTrip(t, bystander, 100) // another port's user is not touched
+
 	after := dial(t, p)
 	defer after.Close()
 	roundTrip(t, after, 100)
-	roundTrip(t, before, 100)
-	if st := r.mgr.Status()[0]; st.Mode != config.ModeQUIC {
-		t.Fatalf("mode = %q", st.Mode)
+	q := r.dialers[config.ModeQUIC].(*tunnel.QUICClient).Status().Open
+	if q != 1 {
+		t.Fatalf("quic streams open = %d, want 1", q)
 	}
-	if mux, q := r.mux.Mode().Open, r.dialers[config.ModeQUIC].(*tunnel.QUICClient).Status().Open; mux != 1 || q != 1 {
-		t.Fatalf("open: mux %d, quic %d", mux, q)
+	for range 100 {
+		if r.mux.Mode().Open == 0 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("mux streams still open: %d", r.mux.Mode().Open)
+}
+
+func TestUDPModeSwitchReconnects(t *testing.T) {
+	r := newRig(t)
+	target := udpEcho(t)
+	pc, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	p := pc.LocalAddr().(*net.UDPAddr).Port
+	pc.Close()
+	f := config.Forward{Listen: p, Target: target, Mode: config.ModeTLS, Proto: "udp"}
+	r.mgr.Apply([]config.Forward{f})
+	r.waitOpen(p)
+	c, err := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(p))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ping := func() bool {
+		buf := make([]byte, 100)
+		for range 5 {
+			_, _ = c.Write([]byte("x"))
+			_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+			if n, err := c.Read(buf); err == nil && n == 1 {
+				return true
+			}
+		}
+		return false
+	}
+	if !ping() {
+		t.Fatal("no echo before the switch")
+	}
+	f.Mode = config.ModeQUIC
+	r.mgr.Apply([]config.Forward{f})
+	if !ping() {
+		t.Fatal("no echo after the switch")
+	}
+	if q := r.dialers[config.ModeQUIC].(*tunnel.QUICClient).Status().Open; q != 1 {
+		t.Fatalf("the client did not move to quic (quic streams = %d)", q)
 	}
 }
 

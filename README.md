@@ -43,7 +43,7 @@ Without arguments the installer asks which server it is on. Run it again later, 
 
 ## Tunnel modes
 
-Each port picks its own mode; change it any time with `pol mode <port> <mode>`.
+Each port picks its own mode; change it any time with `pol mode <port> <mode>`. The change is immediate: that port's open connections are cut and clients reconnect through the new mode within a second or two (other ports are not touched).
 
 | Mode | How it travels | Good for |
 |---|---|---|
