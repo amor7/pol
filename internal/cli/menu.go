@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/amor7/pol/internal/buildinfo"
@@ -96,6 +97,27 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 			{"Status", func() error { return cmdStatus(path) }},
 			{"Show the token for the Iran server", func() error { return cmdToken(path, nil) }},
 			{"Make a new token (old relays stop working)", func() error { return cmdToken(path, []string{"--new"}) }},
+			{"Reverse mode: link a relay (paste its `pol reverse` token)", func() error {
+				t := ask("Token from `pol reverse` on the relay (pol1r_...):", "")
+				if strings.TrimSpace(t) == "" {
+					return nil
+				}
+				return cmdLink(path, []string{t})
+			}},
+			{"Reverse mode: unlink relays", func() error {
+				for _, l := range cfg.Server.Links {
+					info("linked: %s", l.Addr)
+				}
+				if len(cfg.Server.Links) == 0 {
+					info("no relays linked")
+					return nil
+				}
+				a := ask("Address to unlink (or all):", "")
+				if strings.TrimSpace(a) == "" {
+					return nil
+				}
+				return cmdUnlink(path, []string{a})
+			}},
 		}, common...), "server · " + state
 	}
 	return append([]item{
@@ -105,11 +127,21 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 			if strings.TrimSpace(spec) == "" {
 				return nil
 			}
+			fmt.Println()
+			fmt.Println("   1) TCP   2) UDP   3) both")
+			proto := ask("Protocol:", "1")
 			mode, ok := askMode()
 			if !ok {
 				return nil
 			}
-			return cmdAdd(path, append(strings.Fields(spec), "--mode", mode))
+			args := append(strings.Fields(spec), "--mode", mode)
+			switch proto {
+			case "2":
+				args = append(args, "--udp")
+			case "3":
+				args = append(args, "--both")
+			}
+			return cmdAdd(path, args)
 		}},
 		{"Remove ports", func() error {
 			if err := cmdList(path); err != nil {
@@ -138,8 +170,20 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 			}
 			return cmdMode(path, append(strings.Fields(spec), mode))
 		}},
+		{"Speed test (every mode, ranked)", func() error { return cmdSpeed(path, nil) }},
 		{"Ping through the tunnel", func() error { return cmdPing(path) }},
-		{"Speed test (compares the modes)", func() error { return cmdSpeed(path, nil) }},
+		{"Reverse mode: set up (prints a line for the server)", func() error { return cmdReverse(path, nil) }},
+		{"CDN for ws mode (Cloudflare)", func() error {
+			cur := ""
+			if cfg.Relay.CDN != nil {
+				cur = cfg.Relay.CDN.Host
+			}
+			d := ask("Domain on Cloudflare pointing at the server (off to stop):", cur)
+			if strings.TrimSpace(d) == "" {
+				return nil
+			}
+			return cmdCDN(path, []string{d})
+		}},
 	}, common...), "relay · " + state
 }
 
@@ -160,22 +204,29 @@ func followLogs() error {
 	return nil
 }
 
+// modeChoices are the menu's tunnel modes, with what each is for.
+var modeChoices = []struct{ mode, about string }{
+	{config.ModeTLS, "a TLS connection per user connection: encrypted and fast " + dim("(recommended)")},
+	{config.ModeSplit, "each connection over 4 TLS connections: beats per-connection throttling"},
+	{config.ModeQUIC, "streams of one QUIC connection over UDP: copes best with packet loss"},
+	{config.ModeMux, "everything inside a few HTTP/2 connections: one HTTPS session from outside"},
+	{config.ModeObfs, "encrypted TCP with no TLS handshake: looks like noise"},
+	{config.ModeWS, "a WebSocket per connection: can go through Cloudflare (CDN item)"},
+	{config.ModeReverse, "the server connects to this relay: when Iran-to-abroad is cut"},
+	{config.ModeDirect, "plain TCP/UDP straight to the port abroad: nothing added"},
+}
+
 // askMode offers the tunnel modes by number.
 func askMode() (string, bool) {
 	fmt.Println()
-	fmt.Println("   " + bold("Tunnel mode"))
-	fmt.Println("   1) " + bold("tls") + "    - a TLS connection per user connection: encrypted and fast " + dim("(recommended)"))
-	fmt.Println("   2) " + bold("mux") + "    - everything inside a few HTTP/2 connections: the most discreet, slower on bad paths")
-	fmt.Println("   3) " + bold("direct") + " - plain TCP straight to the port abroad: fastest, no encryption added,")
-	fmt.Println("                the port must be reachable from here")
-	switch ask("Choose 1, 2 or 3:", "1") {
-	case "1":
-		return config.ModeTLS, true
-	case "2":
-		return config.ModeMux, true
-	case "3":
-		return config.ModeDirect, true
+	fmt.Println("   " + bold("Tunnel mode") + dim("  (`pol speedtest` shows which is fastest here)"))
+	for i, c := range modeChoices {
+		fmt.Printf("   %d) %-8s - %s\n", i+1, bold(c.mode), c.about)
 	}
-	warnf("choose 1, 2 or 3")
-	return "", false
+	n, err := strconv.Atoi(ask(fmt.Sprintf("Choose 1-%d:", len(modeChoices)), "1"))
+	if err != nil || n < 1 || n > len(modeChoices) {
+		warnf("choose a number from the list")
+		return "", false
+	}
+	return modeChoices[n-1].mode, true
 }

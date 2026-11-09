@@ -2,7 +2,6 @@ package tunnel
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,10 +19,6 @@ import (
 // headerTimeout bounds how long a new stream may wait for the server to say
 // it reached the service. The stream itself may then live for days.
 const headerTimeout = 12 * time.Second
-
-// ErrRejected marks an answer from a healthy server that refused one
-// stream (wrong port, nothing listening): the connection itself is fine.
-var ErrRejected = errors.New("rejected by the server")
 
 // Client is the relay end: a few HTTP/2 connections to the server, each
 // carrying many streams. New streams go to the least busy healthy one.
@@ -252,38 +247,26 @@ func (c *Client) Status() []ConnStatus {
 	return out
 }
 
-// SpeedDown fetches mb megabytes through the tunnel and returns the bytes.
-func (c *Client) SpeedDown(ctx context.Context, mb int) (int64, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, c.base+PathSpeed+"?mb="+strconv.Itoa(mb), nil)
-	req.Header.Set("Authorization", "Bearer "+c.secret)
-	resp, err := c.pick().http.Do(req)
-	if err != nil {
-		return 0, err
+// Mode sums the connections up for `pol status`.
+func (c *Client) Mode() ModeStatus {
+	st := ModeStatus{}
+	n := 0
+	for _, m := range c.Status() {
+		st.Open += m.Open
+		if m.Up {
+			st.Up = true
+			st.RTTms += m.RTTms
+			n++
+		} else if st.Err == "" {
+			st.Err = m.Err
+		}
 	}
-	defer resp.Body.Close()
-	return io.Copy(io.Discard, resp.Body)
-}
-
-// SpeedUp sends mb megabytes through the tunnel and returns what arrived.
-func (c *Client) SpeedUp(ctx context.Context, mb int) (int64, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, c.base+PathSpeed, io.LimitReader(zeros{}, int64(mb)<<20))
-	req.Header.Set("Authorization", "Bearer "+c.secret)
-	req.ContentLength = int64(mb) << 20
-	resp, err := c.pick().http.Do(req)
-	if err != nil {
-		return 0, err
+	if n > 0 {
+		st.RTTms /= float64(n)
+		st.Err = ""
 	}
-	defer resp.Body.Close()
-	var got struct{ Bytes int64 }
-	err = json.NewDecoder(resp.Body).Decode(&got)
-	return got.Bytes, err
-}
-
-type zeros struct{}
-
-func (zeros) Read(p []byte) (int, error) {
-	clear(p)
-	return len(p), nil
+	st.Note = strconv.Itoa(n) + "/" + strconv.Itoa(len(c.pool)) + " connections up"
+	return st
 }
 
 // streamConn is one stream seen as a net.Conn.

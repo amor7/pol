@@ -2,22 +2,20 @@
 
 **[فارسی](README.fa.md)**
 
-*pol* (پل, "bridge") forwards TCP ports from one server to another through **one encrypted tunnel**. Users connect to a server in Iran; their connections arrive at your server abroad as if they had connected to it directly.
+*pol* (پل, "bridge") forwards TCP and UDP ports from one server to another through an **encrypted tunnel**, with **eight tunnel modes** to choose from per port. Users connect to a server in Iran; their connections arrive at your server abroad as if they had connected to it directly.
 
 ```
-              ┌──────────── Iran ────────────┐                 ┌────────── abroad ──────────┐
- users ──────►│ relay  :2088  :8443  :2096 … │══ one TLS ═════►│ server ──► 127.0.0.1:2088  │
-              └──────────────────────────────┘   connection    │            127.0.0.1:443   │
-                                                 (HTTP/2)      └────────────────────────────┘
+              ┌──────────── Iran ────────────┐                    ┌────────── abroad ──────────┐
+ users ──────►│ relay  :2088  :8443  :443/udp│═══ tls / split ═══►│ server ──► 127.0.0.1:2088  │
+              └──────────────────────────────┘    quic / mux …    │            127.0.0.1:443   │
+                                                                  └────────────────────────────┘
 ```
 
-- **One command to install**, one command per port: `pol add 2088`, `pol del 2088`.
-- **One connection between the servers.** Every user connection is a stream inside one HTTPS connection (a few, for speed). From outside it is an ordinary HTTPS client talking to a web server. What users connect to stays inside.
-- **Pinned and authenticated.** The relay trusts only your server's certificate (by fingerprint) and proves itself with a secret. Anyone else who connects gets an ordinary nginx "404 Not Found".
-- **Sturdy.** Each connection has its own flow-control window, so one stuck user cannot hold up the others. Broken tunnel connections are noticed within seconds and redialled. A port that something else holds is retried until it is free.
-- **Small.** One static binary built from Go's standard library alone - no dependencies.
-
-TCP only. Anything that runs over TCP works: VLESS / VMess / Trojan over TCP, WebSocket, gRPC or HTTPUpgrade, **Reality**, SSH, game servers on TCP, web panels. UDP-based protocols (Hysteria2, TUIC, KCP, QUIC, WireGuard) do not.
+- **One command to install**, one command per port: `pol add 2088`, `pol del 2088` - or type `pol` for a menu.
+- **Eight modes, each a different kind of road**, so when one is slow or blocked on your path another may not be. `pol speedtest` measures them all on your own servers and ranks them.
+- **TCP and UDP.** VLESS, VMess, Trojan, Reality, WebSocket, gRPC, SSH - and with UDP ports also Hysteria2, TUIC, WireGuard and KCP.
+- **Pinned and authenticated.** The relay trusts only your server's certificate and proves itself with a secret. Anyone else who connects gets an ordinary nginx error page - or, on obfs, nothing at all.
+- **Sturdy.** One stuck user cannot hold up the others; broken connections are noticed and redialled; a port something else holds is retried until it is free.
 
 ## Install
 
@@ -45,46 +43,88 @@ Without arguments the installer asks which server it is on. Run it again later, 
 
 ## Tunnel modes
 
-Each port picks how its connections travel, and different ports can use different modes:
+Each port picks its own mode; change it any time with `pol mode <port> <mode>`.
 
-| Mode | How | When |
+| Mode | How it travels | Good for |
 |---|---|---|
-| **tls** (default) | every user connection gets its own TLS connection to the server, from a pool kept ready so nobody waits for the handshake | the usual choice: encrypted, and fast on lossy paths and on networks that slow each connection down |
-| **mux** | every user connection is a stream inside a few HTTP/2 connections | the most discreet: from outside it is one HTTPS session; slower when the path loses packets |
-| **direct** | plain TCP straight to the port on the server, no pol in between | the fastest; nothing is added, so the service's own encryption (Reality, TLS) is all there is, and the port must be reachable from the relay |
+| **tls** *(default)* | a TLS connection per user connection, from a pool kept ready | the usual choice: encrypted and fast |
+| **split** | each user connection spread over 4 TLS connections at once, reassembled in order | paths that throttle every connection: even one big download gets several connections' speed |
+| **quic** | streams of one QUIC connection over UDP | lossy paths - a lost packet holds up only its own stream |
+| **mux** | every connection a stream inside a few HTTP/2 connections | the most discreet: from outside, one long HTTPS session |
+| **obfs** | TCP carrying an AES stream, no TLS handshake, random padding | when TLS to foreign servers is singled out: looks like noise from the first byte |
+| **ws** | a WebSocket per connection, as a web page would open | going through **Cloudflare** when the server's IP is blocked (`pol cdn`) |
+| **reverse** | the **server connects to the relay** and keeps connections waiting there | when connections from Iran out are cut but ones coming in are not (`pol reverse`) |
+| **direct** | plain TCP/UDP straight to the port abroad, no pol in between | the fastest; the service's own encryption is all there is |
 
-`pol speedtest` measures tls and mux side by side, four connections at a time as a phone would open, so you can see which suits your path. Both modes share the one tunnel port on the server; direct uses the service's own port.
+All modes but reverse and direct share the server's one tunnel port (TCP, and UDP for quic). The first bytes of a connection tell the server which mode it is.
+
+### Which one?
+
+Run `pol speedtest` on the relay. It measures every mode through your real path, four connections at a time as a phone would, and ranks them:
+
+```
+   MODE              DOWNLOAD           UPLOAD
+   tls            118.2 Mbit/s      41.6 Mbit/s
+   split          164.9 Mbit/s      44.0 Mbit/s
+   quic            92.3 Mbit/s      38.1 Mbit/s
+   mux              9.4 Mbit/s       8.8 Mbit/s
+   ...
+   ✓ fastest here: split (164.9 Mbit/s down, 44.0 Mbit/s up)
+```
+
+*(numbers are an example; yours depend on your servers and path)*
+
+### UDP ports
 
 ```bash
-pol add 2088 --mode tls      # new ports are tls unless you say otherwise
-pol mode 2088 mux            # change a port's mode; open connections finish as they are
+pol add 443/udp --mode quic        # a UDP port (Hysteria2, TUIC, WireGuard, KCP ...)
+pol add 2096 --both                # TCP and UDP on the same port
 ```
+
+UDP datagrams travel framed inside whatever mode the port uses; in direct mode they go as plain UDP.
+
+### Reverse mode
+
+On the relay:
+
+```bash
+pol reverse
+```
+
+It opens a port for the server to connect to and prints `pol link pol1r_...` - run that on the server. Then `pol mode 2088 reverse` on the relay. `pol reverse off` and `pol unlink` undo it.
+
+### Cloudflare for ws mode
+
+Point a domain on Cloudflare (proxied, orange cloud) at the server, set SSL/TLS to **Full**, then on the relay:
+
+```bash
+pol cdn my.domain.com
+pol mode 2088 ws
+```
+
+The server's tunnel port must be one Cloudflare proxies: 443, 2053, 2083, 2087, 2096 or 8443.
 
 ## Commands
 
 Type **`pol`** on either server for a menu of everything below, by number:
 
 ```
-   pol v1.2.0  relay · running
+   pol v1.3.0  relay · running
 
     1) Status
     2) Add ports
     3) Remove ports
     4) List ports
     5) Change the tunnel mode of ports
-    6) Ping through the tunnel
-    7) Speed test (compares the modes)
-    8) Logs (live - Ctrl+C to stop)
-    9) Restart
-   10) Stop
-   11) Speed up the network (BBR)
-   12) Update pol
-   13) Set up again
-   14) Uninstall
-    0) Exit
+    6) Speed test (every mode, ranked)
+    7) Ping through the tunnel
+    8) Reverse mode: set up (prints a line for the server)
+    9) CDN for ws mode (Cloudflare)
+   10) Logs (live - Ctrl+C to stop)
+   ...
 ```
 
-Or use the commands directly:
+Or use the commands directly.
 
 On the **relay** (Iran):
 
@@ -93,13 +133,15 @@ On the **relay** (Iran):
 | `pol add 2088` | forward port 2088 to port 2088 on the server |
 | `pol add 2088:443` | forward port 2088 here to port 443 on the server |
 | `pol add 2080-2085` | forward a range, each port to the same port |
-| `pol add 2088 8443 2096` | several at once (commas work too) |
-| `pol add 2088 --mode mux` | choose the tunnel mode (`tls`, `mux`, `direct`) |
-| `pol mode 2088 tls` | change the mode of ports already forwarded |
-| `pol del 2088` | stop forwarding (also `rm`; ranges work) |
+| `pol add 443/udp` · `pol add 2096 --both` | a UDP port; TCP and UDP together |
+| `pol add 2088 --mode split` | choose the mode (default `tls`) |
+| `pol mode 2088 quic` | change the mode of ports already forwarded |
+| `pol del 2088` | stop forwarding (`2088/udp` for just UDP) |
 | `pol list` | the forwarded ports, with live connections and traffic |
+| `pol speedtest [MB] [--mode M]` | speed of every mode (or one), ranked |
 | `pol ping` | round-trip time through the tunnel |
-| `pol speedtest [MB]` | speed of the tls and mux modes, both directions |
+| `pol reverse` · `pol reverse off` | set up / remove reverse mode |
+| `pol cdn <domain>` · `pol cdn off` | send ws mode through Cloudflare |
 
 On the **server** (abroad):
 
@@ -107,41 +149,30 @@ On the **server** (abroad):
 |---|---|
 | `pol token` | print the join token and the install line again |
 | `pol token --new` | replace the secret; relays need the new token |
+| `pol link <token>` · `pol unlink <addr>` | keep reverse connections to a relay / stop |
 
 On **both**:
 
 | Command | What it does |
 |---|---|
-| `pol status` | connections, round-trip time, ports, traffic |
+| `pol status` | every mode's state, the ports, traffic |
 | `pol logs [-f] [-e]` | service logs (`-f` follow, `-e` problems only) |
 | `pol restart` · `pol stop` · `pol start` | control the service |
 | `pol tune` | turn on BBR and larger TCP buffers (recommended on both) |
 | `pol update` | install the latest release, checksum verified |
 | `pol uninstall` | remove pol |
 
-Ports added or removed take effect immediately, without dropping the other ports' users. ufw rules are added and removed with them when ufw is active. If your provider has a firewall in its web panel, open the ports there yourself: the tunnel port on the server, the forwarded ports on the relay.
-
-`pol status` on the relay:
-
-```
-╭─ pol relay ──────────────────────╮
-│ version  v1.0.0  up 3h12m        │
-│ server   203.0.113.7:443         │
-│ tunnel 1 up  41 ms, 12 open      │
-│ tunnel 2 up  40 ms, 11 open      │
-╰──────────────────────────────────╯
-
-   PORT    TARGET                 STATE      OPEN   TOTAL          UP        DOWN
-   2088    127.0.0.1:2088         open         23     410    1.2 GB      18.4 GB
-```
+Ports added or removed take effect immediately, without dropping the other ports' users. ufw rules follow them when ufw is active. If your provider has a firewall in its web panel, open the ports there yourself: on the server the tunnel port for **TCP and UDP**; on the relay the forwarded ports (and the reverse port if you use it).
 
 ## Configuration
 
 Everything lives in `/etc/pol/config.json` (root only). The commands edit it for you; edits by hand are picked up within two seconds on the relay.
 
-- `relay.conns` - parallel tunnel connections (default 2). More can help on long, lossy paths.
-- `relay.sni` / `server.sni` - the server name the relay announces in the TLS handshake (default `example.com`). Nothing checks it, but Iran drops TLS handshakes that have none.
+- `relay.conns` - HTTP/2 connections for mux mode (default 2).
+- `relay.split_conns` - connections split mode spreads each user over (default 4).
+- `relay.sni` / `server.sni` - the server name the relay announces in TLS handshakes (default `example.com`). Nothing checks it, but Iran drops TLS handshakes that have none.
 - `server.any_target` - by default the server only forwards to its own ports (`127.0.0.1`). Set to `true` to let `pol add 2088:10.0.0.5:443` reach other machines.
+- `server.no_quic` - stop listening for quic mode on UDP.
 
 Several Iran servers can use the same token at once.
 
@@ -157,9 +188,16 @@ Later updates the same way: `pol update --file pol-linux-amd64`.
 
 ## How it works
 
-In **mux** mode the relay keeps a few HTTP/2 connections over TLS 1.3 open to the server, and every user connection becomes one `POST` stream on one of them. The request body carries what the user sends, the response body what comes back. The server checks the secret, connects to the requested port on itself, and copies both ways. Streams are independent: each gets a 4 MB window and the connection 256 MB, so a user who stops reading only stops their own stream. Both ends ping every 15-20 seconds; a connection that stops answering is replaced, and new streams go to the least busy healthy one.
+Whatever the mode, a stream ends the same way on the server: the relay names the target, the server checks it (its own ports only, unless `any_target`) and the secret, connects, answers one status byte, and copies both ways. The modes differ only in the road:
 
-In **tls** mode the relay negotiates a different ALPN on the same port, sends one line naming the secret and the target, gets one byte back, and from then on the connection carries the user's bytes and nothing else. A few such connections are kept handshaken in advance and replaced before the server would time them out.
+- **tls / split** - TLS 1.3 with ALPN `pol1`, the server's certificate pinned by fingerprint. split numbers 16 kB chunks and sends each on whichever of its connections is free; the other side reorders them.
+- **mux** - HTTP/2 over TLS, a `POST` per connection; each stream has its own 4 MB window and the connection 256 MB, so a user who stops reading only stops their own stream.
+- **quic** - QUIC (TLS 1.3 inside) on the tunnel port's number over UDP, a stream per connection.
+- **obfs** - 32 random bytes, then AES-256-CTR keyed from the secret and those bytes, with a timestamp and random padding; a replayed recording is ignored.
+- **ws** - an HTTP/1.1 WebSocket upgrade on the tunnel port, pinging every 30 seconds so CDNs keep it open.
+- **reverse** - the server dials the relay's reverse port (the relay's own certificate pinned), proves the secret, and leaves connections waiting; the relay uses one per user and the server replaces it.
+
+UDP datagrams travel as length-prefixed frames on a stream per client. Probes see nginx: a 400 for plain HTTP, a 404 for HTTPS without the secret, silence for obfs without it.
 
 ## Building
 
@@ -167,6 +205,8 @@ In **tls** mode the relay negotiates a different ALPN on the same port, sends on
 go test ./...
 CGO_ENABLED=0 GOOS=linux go build -o pol .
 ```
+
+The only dependency outside Go's standard library is [quic-go](https://github.com/quic-go/quic-go), for quic mode.
 
 ## License
 

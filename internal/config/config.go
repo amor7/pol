@@ -38,6 +38,18 @@ type Server struct {
 	SNI      string `json:"sni"` // the server name relays announce
 	// AnyTarget lets relays reach other machines, not only this one.
 	AnyTarget bool `json:"any_target,omitempty"`
+	// NoQUIC stops the server answering quic mode on the tunnel port's
+	// number over UDP.
+	NoQUIC bool `json:"no_quic,omitempty"`
+	// Links are relays the server keeps reverse-mode connections open to.
+	Links []Link `json:"links,omitempty"`
+}
+
+// Link is a relay to keep reverse connections to (`pol link`).
+type Link struct {
+	Addr        string `json:"addr"`
+	Fingerprint string `json:"fingerprint"`
+	SNI         string `json:"sni,omitempty"`
 }
 
 // Relay is the end users connect to.
@@ -48,6 +60,27 @@ type Relay struct {
 	SNI         string    `json:"sni"`
 	Conns       int       `json:"conns"` // parallel tunnel connections
 	Ports       []Forward `json:"ports"`
+	// SplitConns is how many connections the split mode spreads each user
+	// connection over (default 4).
+	SplitConns int `json:"split_conns,omitempty"`
+	// CDN, when set, sends the ws mode through a CDN such as Cloudflare.
+	CDN *CDN `json:"cdn,omitempty"`
+	// Reverse, when set, makes the relay accept the server's reverse-mode
+	// connections.
+	Reverse *Reverse `json:"reverse,omitempty"`
+}
+
+// CDN is the domain a CDN serves the server under, for the ws mode.
+type CDN struct {
+	Host string `json:"host"`           // the domain, proxied by the CDN to the server
+	Addr string `json:"addr,omitempty"` // an IP or name to reach the CDN at; the domain if empty
+	Port int    `json:"port,omitempty"` // 443 if empty
+}
+
+// Reverse is the relay's side of the reverse mode.
+type Reverse struct {
+	Listen   string `json:"listen"`    // e.g. ":8444"
+	PublicIP string `json:"public_ip"` // what the server connects to
 }
 
 // Forward sends what arrives on Listen to Target on the server's side.
@@ -55,7 +88,22 @@ type Forward struct {
 	Listen int    `json:"listen"`
 	Target string `json:"target"` // host:port as the server sees it
 	Mode   string `json:"mode,omitempty"`
+	Proto  string `json:"proto,omitempty"` // "udp", or empty for TCP
 }
+
+// UDP reports whether the forward carries UDP.
+func (f Forward) UDP() bool { return f.Proto == "udp" }
+
+// ProtoName is "tcp" or "udp".
+func (f Forward) ProtoName() string {
+	if f.UDP() {
+		return "udp"
+	}
+	return "tcp"
+}
+
+// Key tells forwards apart: a port number can be forwarded for TCP and UDP.
+func (f Forward) Key() string { return strconv.Itoa(f.Listen) + "/" + f.ProtoName() }
 
 // Tunnel modes, chosen per port.
 const (
@@ -69,10 +117,25 @@ const (
 	// TCP: nothing added, fastest, and the service's own encryption is all
 	// there is. The port has to be reachable from the relay.
 	ModeDirect = "direct"
+	// ModeSplit spreads each connection over several TLS connections, so
+	// one download moves at several connections' speed.
+	ModeSplit = "split"
+	// ModeQUIC carries connections as streams of one QUIC connection over
+	// UDP: copes with packet loss better than anything over TCP.
+	ModeQUIC = "quic"
+	// ModeObfs is TCP with an encrypted stream and no TLS handshake: looks
+	// like noise from the first byte.
+	ModeObfs = "obfs"
+	// ModeWS uses a WebSocket per connection, and can go through a CDN such
+	// as Cloudflare when the server's address is blocked.
+	ModeWS = "ws"
+	// ModeReverse has the server connect to the relay instead: for paths
+	// where Iran-to-abroad connections are cut but the other way is open.
+	ModeReverse = "reverse"
 )
 
 // Modes lists the modes in the order menus show them.
-var Modes = []string{ModeTLS, ModeMux, ModeDirect}
+var Modes = []string{ModeTLS, ModeSplit, ModeQUIC, ModeMux, ModeObfs, ModeWS, ModeReverse, ModeDirect}
 
 // DefaultMode is what `pol add` uses when no mode is given.
 const DefaultMode = ModeTLS
@@ -154,10 +217,10 @@ func (c *Config) Save() error {
 	return os.Rename(tmp, c.path)
 }
 
-// Port finds the forward listening on n.
-func (r *Relay) Port(n int) (int, bool) {
+// Find finds the forward listening on n for proto ("tcp" or "udp").
+func (r *Relay) Find(n int, proto string) (int, bool) {
 	for i, f := range r.Ports {
-		if f.Listen == n {
+		if f.Listen == n && f.ProtoName() == proto {
 			return i, true
 		}
 	}
@@ -170,6 +233,7 @@ func (r *Relay) Port(n int) (int, bool) {
 //	2088:443          port 2088 here to port 443 on the server
 //	2088:10.0.0.5:443 port 2088 here to another machine the server can reach
 //	2080-2085         each port in the range to the same port on the server
+//	443/udp           a UDP port (any of the above can end in /udp)
 //
 // Several can be given at once, separated by spaces or commas.
 func ParseForwards(args []string) ([]Forward, error) {
@@ -190,6 +254,20 @@ func ParseForwards(args []string) ([]Forward, error) {
 }
 
 func parseForward(spec string) ([]Forward, error) {
+	proto := ""
+	if s, ok := strings.CutSuffix(spec, "/udp"); ok {
+		spec, proto = s, "udp"
+	} else if s, ok := strings.CutSuffix(spec, "/tcp"); ok {
+		spec = s
+	}
+	fs, err := parsePorts(spec)
+	for i := range fs {
+		fs[i].Proto = proto
+	}
+	return fs, err
+}
+
+func parsePorts(spec string) ([]Forward, error) {
 	listen, target, hasTarget := strings.Cut(spec, ":")
 	if lo, hi, isRange := strings.Cut(listen, "-"); isRange {
 		if hasTarget {

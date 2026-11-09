@@ -11,9 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
-	"sync"
+
 	"time"
 
 	"github.com/amor7/pol/internal/buildinfo"
@@ -55,41 +56,71 @@ func cmdStatus(path string) error {
 		}
 		lines = append(lines, fmt.Sprintf("streams  %d open, %d in all", s.Open, s.Total),
 			fmt.Sprintf("traffic  %s in, %s out", human(s.Up), human(s.Down)))
+		if s.QUIC {
+			lines = append(lines, "quic     "+green("listening")+dim(" on UDP "+st.Listen))
+		} else {
+			lines = append(lines, "quic     "+yellow("not listening")+dim("  - see `pol logs -e`"))
+		}
+		for i, l := range s.Links {
+			label := "reverse  "
+			if i > 0 {
+				label = "         "
+			}
+			state := green("up") + dim(fmt.Sprintf("  %d waiting", l.Idle))
+			if !l.Up {
+				state = red("down") + dim("  "+shorten(l.Err, 60))
+			}
+			lines = append(lines, label+l.Addr+"  "+state)
+		}
 		box("pol server", lines)
 		return nil
 	}
 
-	lines = append(lines, "server   "+cyan(st.Target))
-	for i, c := range st.Conns {
-		state := green("up") + dim(fmt.Sprintf("  %.0f ms, %d open", c.RTTms, c.Open))
-		if !c.Up {
-			state = red("down")
-			if c.Err != "" {
-				state += dim("  " + shorten(c.Err, 60))
-			}
-		}
-		lines = append(lines, fmt.Sprintf("mux %d    %s", i+1, state))
+	lines = append(lines, "server   "+cyan(st.Target), "")
+	used := map[string]int{}
+	for _, f := range cfg.Relay.Ports {
+		used[f.ModeOf()]++
 	}
-	if t := st.Raw; t != nil {
-		state := green("up") + dim(fmt.Sprintf("  %.0f ms handshake, %d open, %d ready", t.RTTms, t.Open, t.Warm))
-		if !t.Up {
-			state = red("down")
-			if t.Err != "" {
-				state += dim("  " + shorten(t.Err, 60))
+	for _, m := range st.Modes {
+		state := ""
+		switch {
+		case m.Up:
+			state = green("up")
+			if m.RTTms > 0 {
+				state += dim(fmt.Sprintf("  %.0f ms", m.RTTms))
+			}
+			if m.Open > 0 || m.Ready > 0 {
+				state += dim(fmt.Sprintf("  %d open", m.Open))
+				if m.Ready > 0 {
+					state += dim(fmt.Sprintf(", %d ready", m.Ready))
+				}
+			}
+		case m.Err != "":
+			state = red("down") + dim("  "+shorten(m.Err, 56))
+		default:
+			state = dim("idle")
+		}
+		if m.Note != "" && m.Err == "" {
+			state += dim("  · " + m.Note)
+		}
+		ports := ""
+		if n := used[m.Mode]; n > 0 {
+			ports = fmt.Sprintf("%d port", n)
+			if n > 1 {
+				ports += "s"
 			}
 		}
-		lines = append(lines, "tls      "+state)
+		lines = append(lines, fmt.Sprintf("%-8s %-8s %s", m.Mode, ports, state))
 	}
 	box("pol relay", lines)
-	live := map[int]relay.PortStatus{}
+	live := map[string]relay.PortStatus{}
 	for _, p := range st.Ports {
-		live[p.Listen] = p
+		live[statusKey(p)] = p
 	}
+	fmt.Println()
 	if len(cfg.Relay.Ports) > 0 {
-		fmt.Println()
 		fmt.Println(portTable(cfg.Relay.Ports, live))
 	} else {
-		fmt.Println()
 		info("no ports forwarded yet - add one with `pol add 2088`")
 	}
 	return nil
@@ -170,85 +201,67 @@ func cmdSpeed(path string, a []string) error {
 		}
 		mb = n
 	}
-	modes := []string{config.ModeTLS, config.ModeMux}
-	if m := o.flags["mode"]; m != "" {
-		if m != config.ModeTLS && m != config.ModeMux {
-			return errors.New("the speed test measures the tls and mux modes (direct mode goes straight to your service)")
-		}
-		modes = []string{m}
-	}
 	cfg, err := loadRelay(path)
 	if err != nil {
 		return err
 	}
-	r := cfg.Relay
-	fmt.Println()
-	info("%d MB each way, %d connections at once, to %s", mb, speedStreams, r.Server)
-	fmt.Println()
-	fmt.Printf("   %s\n", dim(fmt.Sprintf("%-8s %16s %16s", "MODE", "DOWNLOAD", "UPLOAD")))
-	per := max(1, mb/speedStreams)
-	for _, mode := range modes {
-		var down, up func(context.Context, int) (int64, error)
-		switch mode {
-		case config.ModeMux:
-			c := tunnel.NewClient(r.Server, r.Fingerprint, r.Secret, r.SNI, r.Conns, quietLog())
-			defer c.Close()
-			down, up = c.SpeedDown, c.SpeedUp
-		default:
-			c := tunnel.NewRawClient(r.Server, r.Fingerprint, r.Secret, r.SNI, 0, quietLog())
-			down, up = c.SpeedDown, c.SpeedUp
+	var modes []string
+	if m := o.flags["mode"]; m != "" {
+		if !config.ValidMode(m) || m == config.ModeDirect {
+			return fmt.Errorf("measure one of: %s", strings.Join(measurable(cfg.Relay), ", "))
 		}
-		d, err1 := parallel(down, per)
-		u, err2 := parallel(up, per)
-		cell := func(v float64, err error) string {
-			if err != nil {
-				return red(fmt.Sprintf("%16s", "failed"))
-			}
-			return bold(fmt.Sprintf("%16s", mbit(v)))
-		}
-		fmt.Printf("   %-8s %s %s\n", mode, cell(d, err1), cell(u, err2))
-		for _, err := range []error{err1, err2} {
-			if err != nil {
-				warnf("%s: %v", mode, err)
-				break
-			}
-		}
+		modes = []string{m}
+	} else {
+		modes = measurable(cfg.Relay)
+	}
+	if _, err := ctl.Get(); err != nil {
+		return err
 	}
 	fmt.Println()
-	info("direct mode is not measured here: it goes straight to your service, with nothing of pol's in between.")
+	info("%d MB each way per mode, %d connections at once, to %s", mb, speedStreams, cfg.Relay.Server)
+	fmt.Println()
+	fmt.Printf("   %s\n", dim(fmt.Sprintf("%-9s %16s %16s", "MODE", "DOWNLOAD", "UPLOAD")))
+	var results []ctl.SpeedResult
+	for _, m := range modes {
+		if color {
+			fmt.Printf("   %-9s %s", m, dim("measuring..."))
+		}
+		r, err := ctl.Speed(m, mb, speedStreams)
+		if color {
+			fmt.Print("\r\033[K")
+		}
+		if err != nil {
+			return err
+		}
+		if r.Err != "" {
+			fmt.Printf("   %-9s %s\n", m, red(fmt.Sprintf("%16s", "failed"))+dim("  "+shorten(r.Err, 70)))
+			continue
+		}
+		fmt.Printf("   %-9s %s %s\n", m, bold(fmt.Sprintf("%16s", mbit(r.Down))), bold(fmt.Sprintf("%16s", mbit(r.Up))))
+		results = append(results, *r)
+	}
+	if len(results) > 1 {
+		sort.Slice(results, func(i, j int) bool { return results[i].Down+results[i].Up > results[j].Down+results[j].Up })
+		fmt.Println()
+		b := results[0]
+		okf("fastest here: %s (%s down, %s up)", bold(b.Mode), mbit(b.Down), mbit(b.Up))
+		info("switch a port to it with `pol mode <port> %s`", b.Mode)
+	}
+	fmt.Println()
+	info("direct mode is not measured: it goes straight to your service, nothing of pol's in between.")
 	return nil
 }
 
-// parallel runs f on speedStreams connections at once and returns the
-// combined rate in bits per second.
-func parallel(f func(context.Context, int) (int64, error), mb int) (float64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
-	defer cancel()
-	var (
-		wg    sync.WaitGroup
-		mu    sync.Mutex
-		total int64
-		first error
-	)
-	start := time.Now()
-	for range speedStreams {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			n, err := f(ctx, mb)
-			mu.Lock()
-			total += n
-			if err != nil && first == nil {
-				first = err
-			}
-			mu.Unlock()
-		}()
+// measurable is every mode the speed test can try on this relay.
+func measurable(r *config.Relay) []string {
+	var out []string
+	for _, m := range config.Modes {
+		if m == config.ModeDirect || (m == config.ModeReverse && r.Reverse == nil) {
+			continue
+		}
+		out = append(out, m)
 	}
-	wg.Wait()
-	if first != nil {
-		return 0, first
-	}
-	return float64(total*8) / time.Since(start).Seconds(), nil
+	return out
 }
 
 // ---------------------------------------------------------------- token
@@ -459,6 +472,13 @@ func cmdUpdate(a []string) error {
 			}
 		}
 	}
+	// Servers from before quic mode have only the TCP port open.
+	if cfg, err := config.Load(config.DefaultPath); err == nil && cfg.Server != nil && !cfg.Server.NoQUIC {
+		if _, p, err := net.SplitHostPort(cfg.Server.Listen); err == nil {
+			n, _ := strconv.Atoi(p)
+			openUDP([]int{n})
+		}
+	}
 	okf("updated; settings and ports are unchanged")
 	return nil
 }
@@ -481,19 +501,23 @@ func cmdUninstall(path string) error {
 		_ = run("systemctl", "daemon-reload")
 	}
 	if cfg != nil {
-		var ports []int
+		var fs []config.Forward
 		if cfg.Relay != nil {
-			for _, f := range cfg.Relay.Ports {
-				ports = append(ports, f.Listen)
+			fs = append(fs, cfg.Relay.Ports...)
+			if cfg.Relay.Reverse != nil {
+				if _, p, err := net.SplitHostPort(cfg.Relay.Reverse.Listen); err == nil {
+					n, _ := strconv.Atoi(p)
+					fs = append(fs, config.Forward{Listen: n})
+				}
 			}
 		}
 		if cfg.Server != nil {
 			if _, p, err := net.SplitHostPort(cfg.Server.Listen); err == nil {
 				n, _ := strconv.Atoi(p)
-				ports = append(ports, n)
+				fs = append(fs, config.Forward{Listen: n}, config.Forward{Listen: n, Proto: "udp"})
 			}
 		}
-		closePorts(ports)
+		closeForwards(fs)
 	}
 	dir := filepath.Dir(path)
 	if confirm("Also delete the configuration and certificate ("+dir+")?", false) {

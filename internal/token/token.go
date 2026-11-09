@@ -40,3 +40,34 @@ func Parse(s string) (Token, error) {
 	}
 	return t, nil
 }
+
+const linkPrefix = "pol1r_"
+
+// LinkToken is what `pol reverse` prints on the relay for `pol link` on the
+// server: where the relay listens, its certificate, and the server's own
+// secret so the server knows the relay is one of its own.
+type LinkToken struct {
+	Addr        string `json:"a"`
+	Fingerprint string `json:"f"`
+	Secret      string `json:"k"`
+	SNI         string `json:"n,omitempty"`
+}
+
+func (t LinkToken) String() string {
+	b, _ := json.Marshal(t)
+	return linkPrefix + base64.RawURLEncoding.EncodeToString(b)
+}
+
+// ParseLink reads a link token.
+func ParseLink(s string) (LinkToken, error) {
+	s = strings.Join(strings.Fields(s), "")
+	var t LinkToken
+	if !strings.HasPrefix(s, linkPrefix) {
+		return t, errors.New("that is not a reverse-mode token (it should start with " + linkPrefix + " - get it with `pol reverse` on the relay)")
+	}
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(s, linkPrefix))
+	if err != nil || json.Unmarshal(b, &t) != nil || t.Addr == "" || t.Fingerprint == "" || t.Secret == "" {
+		return t, errors.New("the token is damaged - copy it again in one piece")
+	}
+	return t, nil
+}

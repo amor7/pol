@@ -22,14 +22,18 @@ import (
 
 var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
+const secret = "s3cret"
+
+// rig is a server and a relay on this machine with every mode set up.
 type rig struct {
-	t      *testing.T
-	server *tunnel.Server
-	client *tunnel.Client
-	raw    *tunnel.RawClient
-	mgr    *relay.Manager
-	addr   string
-	fp     string
+	t       *testing.T
+	server  *tunnel.Server
+	addr    string
+	fp      string
+	mux     *tunnel.Client
+	tls     *tunnel.LineDialer
+	dialers map[string]relay.Dialer
+	mgr     *relay.Manager
 }
 
 func newRig(t *testing.T) *rig {
@@ -42,21 +46,48 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &tunnel.Server{Secret: "s3cret", Log: quiet}
+	s := &tunnel.Server{Secret: secret, Log: quiet}
 	go s.Serve(l, cert)
+	go s.ServeQUIC(l.Addr().String(), cert) // same port number, over UDP
 	t.Cleanup(func() { s.Close() })
 	r := &rig{t: t, server: s, addr: l.Addr().String(), fp: certs.Fingerprint(cert)}
-	r.client = tunnel.NewClient(r.addr, r.fp, "s3cret", "example.com", 2, quiet)
-	t.Cleanup(r.client.Close)
-	r.raw = tunnel.NewRawClient(r.addr, r.fp, "s3cret", "example.com", 2, quiet)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	go r.raw.Watch(ctx)
-	r.mgr = relay.New(map[string]relay.Dialer{
-		config.ModeMux:    r.client,
-		config.ModeTLS:    r.raw,
-		config.ModeDirect: tunnel.Direct{Host: "127.0.0.1"},
-	}, quiet)
+	r.mux = tunnel.NewClient(r.addr, r.fp, secret, "example.com", 2, quiet)
+	t.Cleanup(r.mux.Close)
+	r.tls = tunnel.NewRawClient(r.addr, r.fp, secret, "example.com", 2, quiet)
+	go r.tls.Watch(ctx)
+	obfs := tunnel.NewObfsClient(r.addr, secret, 2, quiet)
+	go obfs.Watch(ctx)
+	ws := tunnel.NewWSClient(tunnel.WSConfig{Server: r.addr, Fingerprint: r.fp, SNI: "example.com"}, secret, 2, quiet)
+	go ws.Watch(ctx)
+	quic := tunnel.NewQUICClient(r.addr, r.fp, secret, "example.com", quiet)
+	go quic.Watch(ctx)
+
+	// Reverse: the relay listens with its own certificate; the server links.
+	relayCert, err := certs.Load(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rev, err := tunnel.ListenReverse("127.0.0.1:0", relayCert, secret, quiet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rev.Close() })
+	s.SetLinks([]tunnel.Link{{Addr: rev.Addr().String(), Fingerprint: certs.Fingerprint(relayCert)}})
+
+	r.dialers = map[string]relay.Dialer{
+		config.ModeMux:     r.mux,
+		config.ModeTLS:     r.tls,
+		config.ModeSplit:   tunnel.NewSplitClient(r.tls, secret, 4),
+		config.ModeQUIC:    quic,
+		config.ModeObfs:    obfs,
+		config.ModeWS:      ws,
+		config.ModeReverse: rev,
+		config.ModeDirect:  tunnel.Direct{Host: "127.0.0.1"},
+	}
+	r.mgr = relay.New(r.dialers, quiet)
 	t.Cleanup(r.mgr.Close)
 	return r
 }
@@ -65,6 +96,15 @@ func newRig(t *testing.T) *rig {
 func eachMode(t *testing.T, fn func(t *testing.T, mode string)) {
 	for _, m := range config.Modes {
 		t.Run(m, func(t *testing.T) { fn(t, m) })
+	}
+}
+
+// tunnelled is every mode that goes through pol's server (not direct).
+func tunnelled(t *testing.T, fn func(t *testing.T, mode string)) {
+	for _, m := range config.Modes {
+		if m != config.ModeDirect {
+			t.Run(m, func(t *testing.T) { fn(t, m) })
+		}
 	}
 }
 
@@ -100,6 +140,26 @@ func service(t *testing.T, fn func(net.Conn)) string {
 }
 
 func echo(c net.Conn) { _, _ = io.Copy(c, c) }
+
+// udpEcho starts a UDP echo service on loopback.
+func udpEcho(t *testing.T) string {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { pc.Close() })
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, a, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			_, _ = pc.WriteTo(buf[:n], a)
+		}
+	}()
+	return pc.LocalAddr().String()
+}
 
 // forward makes the relay listen on a fresh port for target and waits for
 // it to open.
@@ -150,70 +210,143 @@ func roundTrip(t *testing.T, c net.Conn, size int) {
 }
 
 func TestForwardEcho(t *testing.T) {
-	eachMode(t, testForwardEcho)
-}
+	eachMode(t, func(t *testing.T, mode string) {
+		r := newRig(t)
+		p := r.forward(service(t, echo), mode)
+		c := dial(t, p)
+		defer c.Close()
+		roundTrip(t, c, 10)
+		roundTrip(t, c, 1<<20)
 
-func testForwardEcho(t *testing.T, mode string) {
-	r := newRig(t)
-	p := r.forward(service(t, echo), mode)
-	c := dial(t, p)
-	defer c.Close()
-	roundTrip(t, c, 10)
-	roundTrip(t, c, 1<<20)
-
-	st := r.mgr.Status()[0]
-	if st.Active != 1 || st.Total != 1 || st.Up < 1<<20 || st.Down < 1<<20 {
+		// Counters are added just after each write, so give them a moment.
+		var st relay.PortStatus
+		for range 100 {
+			st = r.mgr.Status()[0]
+			if st.Active == 1 && st.Total == 1 && st.Up >= 1<<20 && st.Down >= 1<<20 {
+				return
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
 		t.Fatalf("port counters = %+v", st)
-	}
+	})
 }
 
 func TestManyConnectionsAtOnce(t *testing.T) {
 	eachMode(t, func(t *testing.T, mode string) {
 		r := newRig(t)
-		manyAtOnce(t, r.forward(service(t, echo), mode))
-	})
-}
-
-func manyAtOnce(t *testing.T, p int) {
-	var wg sync.WaitGroup
-	for range 60 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			c := dial(t, p)
-			defer c.Close()
-			roundTrip(t, c, 128<<10)
-		}()
-	}
-	wg.Wait()
-}
-
-func TestLargeDownloadAndHalfClose(t *testing.T) {
-	eachMode(t, testLargeDownload)
-}
-
-func testLargeDownload(t *testing.T, mode string) {
-	r := newRig(t)
-	const size = 48 << 20
-	// The service reads the whole request, then answers; the user closes
-	// their sending side first, as an HTTP/1.0 client might.
-	target := service(t, func(c net.Conn) {
-		n, _ := io.Copy(io.Discard, c)
-		if n != 5 {
-			return
+		p := r.forward(service(t, echo), mode)
+		var wg sync.WaitGroup
+		for range 40 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				c := dial(t, p)
+				defer c.Close()
+				roundTrip(t, c, 128<<10)
+			}()
 		}
-		_, _ = io.CopyN(c, zeroReader{}, size)
+		wg.Wait()
 	})
-	p := r.forward(target, mode)
-	c := dial(t, p).(*net.TCPConn)
-	defer c.Close()
-	_, _ = c.Write([]byte("hello"))
-	_ = c.CloseWrite()
-	_ = c.SetReadDeadline(time.Now().Add(60 * time.Second))
-	n, err := io.Copy(io.Discard, c)
-	if err != nil || n != size {
-		t.Fatalf("got %d bytes, err %v; want %d", n, err, size)
-	}
+}
+
+// The service reads the whole request, then answers; the user closes their
+// sending side first, as an HTTP/1.0 client might.
+func TestLargeDownloadAndHalfClose(t *testing.T) {
+	eachMode(t, func(t *testing.T, mode string) {
+		r := newRig(t)
+		const size = 32 << 20
+		target := service(t, func(c net.Conn) {
+			n, _ := io.Copy(io.Discard, c)
+			if n != 5 {
+				return
+			}
+			_, _ = io.CopyN(c, zeroReader{}, size)
+		})
+		p := r.forward(target, mode)
+		c := dial(t, p).(*net.TCPConn)
+		defer c.Close()
+		_, _ = c.Write([]byte("hello"))
+		_ = c.CloseWrite()
+		_ = c.SetReadDeadline(time.Now().Add(60 * time.Second))
+		n, err := io.Copy(io.Discard, c)
+		if err != nil || n != size {
+			t.Fatalf("got %d bytes, err %v; want %d", n, err, size)
+		}
+	})
+}
+
+// A large upload arrives intact and in order (split reorders chunks that
+// arrive over different connections).
+func TestLargeUploadIntact(t *testing.T) {
+	tunnelled(t, func(t *testing.T, mode string) {
+		r := newRig(t)
+		const size = 16 << 20
+		sum := make(chan []byte, 1)
+		target := service(t, func(c net.Conn) {
+			got, _ := io.ReadAll(c)
+			sum <- got
+			_, _ = c.Write([]byte("ok"))
+		})
+		p := r.forward(target, mode)
+		c := dial(t, p).(*net.TCPConn)
+		defer c.Close()
+		msg := make([]byte, size)
+		_, _ = rand.Read(msg)
+		go func() {
+			_, _ = c.Write(msg)
+			_ = c.CloseWrite()
+		}()
+		select {
+		case got := <-sum:
+			if !bytes.Equal(got, msg) {
+				t.Fatalf("upload arrived different (%d bytes)", len(got))
+			}
+		case <-time.After(60 * time.Second):
+			t.Fatal("upload did not arrive")
+		}
+		_ = c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		if b, _ := io.ReadAll(c); string(b) != "ok" {
+			t.Fatalf("answer after upload = %q", b)
+		}
+	})
+}
+
+func TestUDP(t *testing.T) {
+	eachMode(t, func(t *testing.T, mode string) {
+		r := newRig(t)
+		target := udpEcho(t)
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := pc.LocalAddr().(*net.UDPAddr).Port
+		pc.Close()
+		r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: mode, Proto: "udp"}})
+		r.waitOpen(p)
+
+		c, err := net.Dial("udp", "127.0.0.1:"+strconv.Itoa(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		buf := make([]byte, 2000)
+		for i := range 30 {
+			msg := []byte("datagram " + strconv.Itoa(i))
+			got := false
+			for try := 0; try < 5 && !got; try++ { // UDP may drop; ask again
+				_, _ = c.Write(msg)
+				_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+				n, err := c.Read(buf)
+				got = err == nil && bytes.Equal(buf[:n], msg)
+			}
+			if !got {
+				t.Fatalf("datagram %d did not come back", i)
+			}
+		}
+		if st := r.mgr.Status()[0]; st.Proto != "udp" || st.Total != 1 || st.Active != 1 {
+			t.Fatalf("udp port = %+v", st)
+		}
+	})
 }
 
 // One user whose upload is not being read (the service is busy or stuck)
@@ -223,7 +356,7 @@ func TestStalledUserDoesNotBlockOthers(t *testing.T) {
 	r := newRig(t)
 	// One tunnel connection, so both users share it: with two, the second
 	// would simply land on the other one and the test would prove nothing.
-	one := tunnel.NewClient(r.addr, r.fp, "s3cret", "example.com", 1, quiet)
+	one := tunnel.NewClient(r.addr, r.fp, secret, "example.com", 1, quiet)
 	t.Cleanup(one.Close)
 	r.mgr.SetDialers(map[string]relay.Dialer{config.ModeMux: one})
 
@@ -292,18 +425,17 @@ func TestModeSwitch(t *testing.T) {
 	before := dial(t, p)
 	defer before.Close()
 	roundTrip(t, before, 100)
-	muxOpen := r.client.Status()[0].Open + r.client.Status()[1].Open
 
-	r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: config.ModeTLS}})
+	r.mgr.Apply([]config.Forward{{Listen: p, Target: target, Mode: config.ModeQUIC}})
 	after := dial(t, p)
 	defer after.Close()
 	roundTrip(t, after, 100)
 	roundTrip(t, before, 100)
-	if st := r.mgr.Status()[0]; st.Mode != config.ModeTLS {
+	if st := r.mgr.Status()[0]; st.Mode != config.ModeQUIC {
 		t.Fatalf("mode = %q", st.Mode)
 	}
-	if r.raw.Status().Open != 1 || muxOpen != 1 {
-		t.Fatalf("open: tls %d, mux %d", r.raw.Status().Open, muxOpen)
+	if mux, q := r.mux.Mode().Open, r.dialers[config.ModeQUIC].(*tunnel.QUICClient).Status().Open; mux != 1 || q != 1 {
+		t.Fatalf("open: mux %d, quic %d", mux, q)
 	}
 }
 
@@ -333,63 +465,60 @@ func TestBusyPortIsRetried(t *testing.T) {
 	roundTrip(t, c, 100)
 }
 
-func TestWrongSecretAndForeignTargets(t *testing.T) {
+func TestWrongSecretIsRefused(t *testing.T) {
 	r := newRig(t)
-	bad := tunnel.NewClient(r.addr, r.fp, "wrong", "example.com", 1, quiet)
-	defer bad.Close()
-	if _, err := bad.Dial("127.0.0.1:1"); err == nil || errors.Is(err, tunnel.ErrRejected) {
-		t.Fatalf("wrong secret: err = %v", err)
+	bad := map[string]relay.Dialer{
+		"mux":  tunnel.NewClient(r.addr, r.fp, "wrong", "example.com", 1, quiet),
+		"tls":  tunnel.NewRawClient(r.addr, r.fp, "wrong", "example.com", 0, quiet),
+		"obfs": tunnel.NewObfsClient(r.addr, "wrong", 0, quiet),
+		"ws":   tunnel.NewWSClient(tunnel.WSConfig{Server: r.addr, Fingerprint: r.fp}, "wrong", 0, quiet),
+		"quic": tunnel.NewQUICClient(r.addr, r.fp, "wrong", "example.com", quiet),
 	}
-	if _, err := bad.Ping(context.Background()); err == nil {
-		t.Fatal("wrong secret pinged")
-	}
-
-	badRaw := tunnel.NewRawClient(r.addr, r.fp, "wrong", "example.com", 0, quiet)
-	if _, err := badRaw.Dial("127.0.0.1:1"); err == nil || errors.Is(err, tunnel.ErrRejected) {
-		t.Fatalf("wrong secret, tls mode: err = %v", err)
-	}
-
-	for name, d := range map[string]relay.Dialer{"mux": r.client, "tls": r.raw} {
-		if _, err := d.Dial("10.255.255.1:80"); !errors.Is(err, tunnel.ErrRejected) {
-			t.Fatalf("%s: another machine's port: err = %v", name, err)
-		}
-		if _, err := d.Dial("127.0.0.1:" + strconv.Itoa(freePort(t))); !errors.Is(err, tunnel.ErrRejected) {
-			t.Fatalf("%s: closed local port: err = %v", name, err)
+	for name, d := range bad {
+		if _, err := d.Dial("127.0.0.1:1"); err == nil || errors.Is(err, tunnel.ErrRejected) {
+			t.Errorf("%s with the wrong secret: err = %v", name, err)
 		}
 	}
-
 	// The wrong certificate is refused outright.
 	other, _ := certs.Load(t.TempDir())
-	imp := tunnel.NewClient(r.addr, certs.Fingerprint(other), "s3cret", "example.com", 1, quiet)
+	imp := tunnel.NewClient(r.addr, certs.Fingerprint(other), secret, "example.com", 1, quiet)
 	defer imp.Close()
 	if _, err := imp.Ping(context.Background()); err == nil {
 		t.Fatal("a server with another certificate was trusted")
 	}
 }
 
-func TestPingAndSpeed(t *testing.T) {
-	r := newRig(t)
-	if _, err := r.client.Ping(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	for name, c := range map[string]interface {
-		SpeedDown(context.Context, int) (int64, error)
-		SpeedUp(context.Context, int) (int64, error)
-	}{"mux": r.client, "tls": r.raw} {
-		down, err := c.SpeedDown(ctx, 3)
+func TestForeignAndClosedTargetsAreRefused(t *testing.T) {
+	tunnelled(t, func(t *testing.T, mode string) {
+		r := newRig(t)
+		d := r.dialers[mode]
+		if _, err := d.Dial("10.255.255.1:80"); !errors.Is(err, tunnel.ErrRejected) {
+			t.Fatalf("another machine's port: err = %v", err)
+		}
+		if _, err := d.Dial("127.0.0.1:" + strconv.Itoa(freePort(t))); !errors.Is(err, tunnel.ErrRejected) {
+			t.Fatalf("closed local port: err = %v", err)
+		}
+	})
+}
+
+func TestSpeedThroughEveryMode(t *testing.T) {
+	tunnelled(t, func(t *testing.T, mode string) {
+		r := newRig(t)
+		ctx := context.Background()
+		d := r.dialers[mode]
+		down, err := tunnel.SpeedDown(ctx, d, 3)
 		if err != nil || down != 3<<20 {
-			t.Fatalf("%s download: %d, %v", name, down, err)
+			t.Fatalf("download: %d, %v", down, err)
 		}
-		up, err := c.SpeedUp(ctx, 3)
+		up, err := tunnel.SpeedUp(ctx, d, 3)
 		if err != nil || up != 3<<20 {
-			t.Fatalf("%s upload: %d, %v", name, up, err)
+			t.Fatalf("upload: %d, %v", up, err)
 		}
-	}
+	})
 }
 
 func TestParseForwards(t *testing.T) {
-	got, err := config.ParseForwards([]string{"2088", "2089:443,2090:10.0.0.5:443", "3000-3002"})
+	got, err := config.ParseForwards([]string{"2088", "2089:443,2090:10.0.0.5:443", "3000-3002", "443/udp", "53:5353/udp"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,6 +529,8 @@ func TestParseForwards(t *testing.T) {
 		{Listen: 3000, Target: "127.0.0.1:3000"},
 		{Listen: 3001, Target: "127.0.0.1:3001"},
 		{Listen: 3002, Target: "127.0.0.1:3002"},
+		{Listen: 443, Target: "127.0.0.1:443", Proto: "udp"},
+		{Listen: 53, Target: "127.0.0.1:5353", Proto: "udp"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v", got)
@@ -409,7 +540,7 @@ func TestParseForwards(t *testing.T) {
 			t.Fatalf("got %v, want %v", got, want)
 		}
 	}
-	for _, bad := range []string{"0", "70000", "abc", "3000-2000", "1-5000", "3000-3002:80", "2088:x"} {
+	for _, bad := range []string{"0", "70000", "abc", "3000-2000", "1-5000", "3000-3002:80", "2088:x", "53/sctp"} {
 		if _, err := config.ParseForwards([]string{bad}); err == nil {
 			t.Errorf("%q was accepted", bad)
 		}

@@ -173,12 +173,13 @@ func setupServer(path string, old *config.Config, o opts) error {
 		okf("service started")
 	}
 	openPorts([]int{port})
+	openUDP([]int{port}) // quic mode
 
 	tok := token.Token{Server: net.JoinHostPort(s.PublicIP, strconv.Itoa(port)), Fingerprint: certs.Fingerprint(cert), Secret: s.Secret, SNI: s.SNI}
 	box("Server is ready", []string{
 		"tunnel   " + cyan(tok.Server),
 		"",
-		dim("If your provider has a firewall in its panel, open TCP " + strconv.Itoa(port) + " there."),
+		dim("If your provider has a firewall in its panel, open TCP and UDP " + strconv.Itoa(port) + " there."),
 		dim("`pol token` prints the token again whenever you need it."),
 		dim("Type `pol` any time for the menu."),
 	})
@@ -237,7 +238,7 @@ func setupRelay(path string, old *config.Config, o opts) error {
 		}
 		for _, f := range fs {
 			f.Mode = mode
-			if i, ok := r.Port(f.Listen); ok {
+			if i, ok := r.Find(f.Listen, f.ProtoName()); ok {
 				r.Ports[i] = f
 			} else {
 				r.Ports = append(r.Ports, f)
@@ -276,11 +277,7 @@ func setupRelay(path string, old *config.Config, o opts) error {
 		}
 		okf("service started")
 	}
-	ports := make([]int, len(r.Ports))
-	for i, f := range r.Ports {
-		ports[i] = f.Listen
-	}
-	openPorts(ports)
+	openForwards(r.Ports)
 
 	lines := []string{"server   " + cyan(tok.Server), ""}
 	if len(r.Ports) == 0 {
@@ -288,7 +285,7 @@ func setupRelay(path string, old *config.Config, o opts) error {
 	} else {
 		lines = append(lines, bold("Forwarded ports"))
 		for _, f := range r.Ports {
-			lines = append(lines, fmt.Sprintf("  %-6d → %s  %s", f.Listen, f.Target, dim(f.ModeOf()+" mode")))
+			lines = append(lines, fmt.Sprintf("  %-10s → %s  %s", f.Key(), f.Target, dim(f.ModeOf()+" mode")))
 		}
 		lines = append(lines, "", dim("Point your clients at this server's IP with the same ports."))
 	}

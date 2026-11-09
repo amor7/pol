@@ -14,7 +14,7 @@ import (
 	"github.com/amor7/pol/internal/daemon"
 )
 
-const usage = `pol - forward ports from one server to another through one encrypted tunnel
+const usage = `pol - forward ports from one server to another through an encrypted tunnel
 
 Usage: pol <command> [arguments]
        pol               a menu of everything below, by number
@@ -22,24 +22,36 @@ Usage: pol <command> [arguments]
 Setting up
   setup                     interactive setup (asks whether this is the server or the relay)
   setup server [--port N]   set up the abroad server (where your services run)
-  setup relay <token> [--ports 2088,8443]
+  setup relay <token> [--ports 2088,8443] [--mode M]
                             set up the relay in Iran with the token the server printed
 
 Ports (on the relay)
-  add <port>... [--mode M]  forward ports:  2088   2088:443   2080-2085   2088:10.0.0.5:443
-  del <port>...             stop forwarding ports (also: rm, remove)
+  add <port>... [--mode M] [--udp|--both]
+                            forward ports:  2088   2088:443   2080-2085   443/udp   2088:10.0.0.5:443
+  del <port>...             stop forwarding (2088 = TCP and UDP, 2088/udp = only UDP)
   mode <port>... <M>        change the tunnel mode of forwarded ports
   list                      the forwarded ports (also: ports, ls)
 
 Tunnel modes (M), chosen per port
   tls      a TLS connection per user connection - encrypted and fast (default)
-  mux      all connections inside a few HTTP/2 connections - the most discreet
-  direct   plain TCP straight to the port abroad - fastest, nothing added
+  split    each connection spread over 4 TLS connections - beats per-connection throttling
+  quic     streams of one QUIC connection over UDP - copes best with packet loss
+  mux      all connections inside a few HTTP/2 connections - one HTTPS session from outside
+  obfs     encrypted TCP with no TLS handshake - looks like noise
+  ws       WebSocket per connection - can go through Cloudflare (pol cdn)
+  reverse  the server connects to the relay - when Iran-to-abroad is cut (pol reverse)
+  direct   plain TCP/UDP straight to the port abroad - nothing added
+
+Mode setup
+  reverse [--port N] | off  relay: accept the server's reverse connections; prints the line for the server
+  link <token>              server: keep reverse connections to the relay that printed this
+  unlink <addr> | all       server: stop that
+  cdn <domain> | off        relay: send ws mode through Cloudflare under this domain
 
 Everyday
-  status                    what is connected and how much has gone through
+  status                    every mode's state, the ports and their traffic
+  speedtest [MB] [--mode M] speed of each mode, both ways, ranked (relay)
   ping                      round-trip time through the tunnel (relay)
-  speedtest [MB]            speed of each mode, both ways (relay, default 20 MB)
   token [--new]             print the join token; --new replaces the secret (server)
   logs [-f] [-e]            service logs (-f follow, -e warnings and errors only)
   restart | start | stop    control the service
@@ -83,6 +95,14 @@ func Main(args []string) int {
 		err = cmdDel(*cfgPath, a)
 	case "mode":
 		err = cmdMode(*cfgPath, a)
+	case "reverse":
+		err = cmdReverse(*cfgPath, a)
+	case "link":
+		err = cmdLink(*cfgPath, a)
+	case "unlink":
+		err = cmdUnlink(*cfgPath, a)
+	case "cdn":
+		err = cmdCDN(*cfgPath, a)
 	case "list", "ls", "ports":
 		err = cmdList(*cfgPath)
 	case "status":

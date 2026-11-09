@@ -1,10 +1,11 @@
-// Package tunnel carries TCP connections as streams inside HTTP/2
-// connections over TLS: the relay opens a request per connection, the
-// request body is what the user sends and the response body what comes
-// back. From outside it is an HTTPS client talking to an HTTPS server.
+// Package tunnel carries TCP connections (and UDP, as framed datagrams) from
+// the relay to the server in several ways - the modes. Each mode is only a
+// different road: at the end of every one the server reads which service
+// the relay wants, checks it, connects, and copies both ways (endpoint.go).
 package tunnel
 
 import (
+	"bufio"
 	"context"
 	"crypto/subtle"
 	"crypto/tls"
@@ -21,13 +22,24 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 const (
 	PathStream   = "/v1/s"
 	PathPing     = "/v1/ping"
 	PathSpeed    = "/v1/speed"
+	PathWS       = "/v1/ws"
 	HeaderTarget = "X-Pol-To"
+)
+
+// ALPN names. The one tunnel port tells the modes apart by these (and
+// obfs by not being TLS at all).
+const (
+	ProtoRaw     = "pol1"   // tls mode and split subflows
+	ProtoQUIC    = "pol-q1" // quic mode, on the same port number over UDP
+	ProtoReverse = "pol-r1" // reverse mode, server to relay
 )
 
 // Window sizes. Go's defaults (1 MB for a whole connection) let one user
@@ -54,8 +66,11 @@ type Server struct {
 	refusedNoted atomic.Int64
 	closed       atomic.Bool
 	ln           net.Listener
-	httpL        *chanListener
-	raws         map[net.Conn]struct{}
+	qln          *quic.Listener
+	conns        map[net.Conn]struct{}
+	splits       map[string]*splitPending
+	links        map[string]*link
+	replay       replayCache
 }
 
 type relaySeen struct {
@@ -63,12 +78,11 @@ type relaySeen struct {
 	open int64
 }
 
-// Serve answers on l until Close.
-func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
+func (s *Server) httpServer(cert tls.Certificate) *http.Server {
 	p := new(http.Protocols)
-	p.SetHTTP1(true) // so a browser that wanders in gets the decoy page
+	p.SetHTTP1(true) // ws mode, and the decoy page for browsers
 	p.SetHTTP2(true)
-	s.srv = &http.Server{
+	return &http.Server{
 		Handler:   s,
 		Protocols: p,
 		TLSConfig: &tls.Config{
@@ -87,15 +101,20 @@ func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
 		IdleTimeout:       3 * time.Minute,
 		ErrorLog:          log.New(io.Discard, "", 0), // scanners' failed handshakes are not news
 	}
-	// The TLS handshake is done here rather than by the HTTP server, so the
-	// relay's ALPN can pick the mode: "h2" goes to the HTTP/2 tunnel,
-	// ProtoRaw to one-connection-per-stream. Both share the one port.
+}
+
+// Serve answers on the TCP listener l until Close. What arrives is told
+// apart by its first bytes: a TLS handshake (then ALPN picks mux, ws or
+// tls/split), an HTTP request in the clear (the decoy), or anything else,
+// which can only be obfs.
+func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
+	s.mu.Lock()
+	s.srv = s.httpServer(cert)
+	s.ln = l
+	s.mu.Unlock()
 	tlsCfg := s.srv.TLSConfig.Clone()
 	tlsCfg.NextProtos = []string{"h2", "http/1.1", ProtoRaw}
 	httpL := newChanListener(l.Addr())
-	s.mu.Lock()
-	s.ln, s.httpL = l, httpL
-	s.mu.Unlock()
 	go func() { _ = s.srv.Serve(httpL) }()
 	for {
 		c, err := l.Accept()
@@ -110,22 +129,41 @@ func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
 			}
 			return err
 		}
-		go func() {
-			tc := tls.Server(c, tlsCfg)
-			_ = tc.SetDeadline(time.Now().Add(15 * time.Second))
-			if err := tc.Handshake(); err != nil {
-				c.Close()
-				return
-			}
-			_ = tc.SetDeadline(time.Time{})
-			if tc.ConnectionState().NegotiatedProtocol == ProtoRaw {
-				s.raw(tc)
-				return
-			}
-			if !httpL.push(tc) {
-				tc.Close()
-			}
-		}()
+		go s.first(c, tlsCfg, httpL)
+	}
+}
+
+func (s *Server) first(c net.Conn, tlsCfg *tls.Config, httpL *chanListener) {
+	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
+	pc := &peekConn{Conn: c, br: bufio.NewReaderSize(c, 4096)}
+	b, err := pc.br.Peek(1)
+	if err != nil {
+		c.Close()
+		return
+	}
+	ip := hostOf(c.RemoteAddr())
+	switch {
+	case b[0] == 0x16: // TLS handshake record
+		tc := tls.Server(pc, tlsCfg)
+		_ = tc.SetDeadline(time.Now().Add(15 * time.Second))
+		if err := tc.Handshake(); err != nil {
+			c.Close()
+			return
+		}
+		_ = tc.SetDeadline(time.Time{})
+		if tc.ConnectionState().NegotiatedProtocol == ProtoRaw {
+			s.serveLine(tc, ip, rawPreambleWait, nil)
+			return
+		}
+		if !httpL.push(tc) {
+			tc.Close()
+		}
+	case b[0] >= 'A' && b[0] <= 'Z': // plain HTTP: someone looking around
+		_ = c.SetDeadline(time.Now().Add(5 * time.Second))
+		_, _ = io.WriteString(c, "HTTP/1.1 400 Bad Request\r\nServer: nginx\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n<html>\r\n<head><title>400 The plain HTTP request was sent to HTTPS port</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<center>The plain HTTP request was sent to HTTPS port</center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n")
+		c.Close()
+	default:
+		s.serveObfs(pc, ip)
 	}
 }
 
@@ -133,19 +171,43 @@ func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
 func (s *Server) Close() error {
 	s.closed.Store(true)
 	s.mu.Lock()
-	ln, raws := s.ln, s.raws
-	s.raws = nil
+	ln, qln, conns, links := s.ln, s.qln, s.conns, s.links
+	s.conns, s.links = nil, nil
 	s.mu.Unlock()
 	if ln != nil {
 		ln.Close()
 	}
-	for c := range raws {
+	if qln != nil {
+		qln.Close()
+	}
+	for _, l := range links {
+		l.stop()
+	}
+	for c := range conns {
 		c.Close()
 	}
 	if s.srv == nil {
 		return nil
 	}
 	return s.srv.Close()
+}
+
+// track remembers open stream connections so Close can end them.
+func (s *Server) track(c net.Conn, add bool) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !add {
+		delete(s.conns, c)
+		return true
+	}
+	if s.closed.Load() {
+		return false
+	}
+	if s.conns == nil {
+		s.conns = map[net.Conn]struct{}{}
+	}
+	s.conns[c] = struct{}{}
+	return true
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -156,10 +218,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case PathPing:
-		s.seen(r, 0)
+		s.seenIP(hostOfString(r.RemoteAddr), 0)
 		w.WriteHeader(http.StatusNoContent)
 	case PathStream:
 		s.stream(w, r)
+	case PathWS:
+		s.serveWS(w, r)
 	case PathSpeed:
 		s.speed(w, r)
 	default:
@@ -169,7 +233,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) authorized(r *http.Request) bool {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-	return ok && s.Secret != "" && subtle.ConstantTimeCompare([]byte(got), []byte(s.Secret)) == 1
+	return ok && s.secretOK(got)
+}
+
+func (s *Server) secretOK(got string) bool {
+	return s.Secret != "" && subtle.ConstantTimeCompare([]byte(got), []byte(s.Secret)) == 1
 }
 
 // decoy is what anyone without the secret sees: an ordinary web server with
@@ -180,20 +248,20 @@ func decoy(w http.ResponseWriter) {
 	_, _ = io.WriteString(w, "<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n")
 }
 
+// stream is the mux mode: one HTTP/2 request per connection.
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	if r.ProtoMajor != 2 || r.Method != http.MethodPost {
 		http.Error(w, "HTTP/2 POST only", http.StatusBadRequest)
 		return
 	}
-	target := r.Header.Get(HeaderTarget)
-	up, code, msg := s.dialTarget(r.Context(), target)
-	if up == nil {
-		http.Error(w, msg, code)
+	ep, st := s.endpoint(r.Context(), r.Header.Get(HeaderTarget))
+	if ep == nil {
+		http.Error(w, statusText(st), httpStatus(st))
 		return
 	}
-	defer up.Close()
+	defer ep.close()
 	// A gone relay ends the request context; take the service side down too.
-	stop := context.AfterFunc(r.Context(), func() { up.Close() })
+	stop := context.AfterFunc(r.Context(), ep.close)
 	defer stop()
 
 	rc := http.NewResponseController(w)
@@ -203,40 +271,38 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	if rc.Flush() != nil {
 		return
 	}
-	s.open.Add(1)
-	s.total.Add(1)
-	s.seen(r, 1)
-	defer func() {
-		s.open.Add(-1)
-		s.seen(r, -1)
-	}()
-
-	go func() {
-		n, _ := io.Copy(up, r.Body)
-		s.up.Add(n)
-		if cw, ok := up.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-	}()
-	buf := make([]byte, 32<<10)
-	for {
-		n, err := up.Read(buf)
-		if n > 0 {
-			if _, werr := w.Write(buf[:n]); werr != nil {
-				return
-			}
-			s.down.Add(int64(n))
-			if rc.Flush() != nil {
-				return
-			}
-		}
-		if err != nil {
-			return
-		}
-	}
+	ip := hostOfString(r.RemoteAddr)
+	s.begin(ip)
+	defer s.end(ip)
+	ep.run(s, &h2Conn{w: w, rc: rc, body: r.Body}, r.Body)
 }
 
-// speed sends (GET ?mb=N) or swallows (POST) data for `pol speedtest`.
+// h2Conn is the mux stream's response side seen as a connection. A
+// response cannot be half-closed; it ends when the handler returns.
+type h2Conn struct {
+	w    http.ResponseWriter
+	rc   *http.ResponseController
+	body io.Reader
+}
+
+func (c *h2Conn) Read(p []byte) (int, error) { return c.body.Read(p) }
+func (c *h2Conn) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if err == nil {
+		err = c.rc.Flush()
+	}
+	return n, err
+}
+func (c *h2Conn) CloseWrite() error                { return nil }
+func (c *h2Conn) Close() error                     { return nil }
+func (c *h2Conn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (c *h2Conn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (c *h2Conn) SetDeadline(time.Time) error      { return nil }
+func (c *h2Conn) SetReadDeadline(time.Time) error  { return nil }
+func (c *h2Conn) SetWriteDeadline(time.Time) error { return nil }
+
+// speed is what relays before 1.3 used for `pol speedtest`; newer ones
+// measure through each mode with the @down and @up targets.
 func (s *Server) speed(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost {
 		n, _ := io.Copy(io.Discard, r.Body)
@@ -255,28 +321,6 @@ func (s *Server) speed(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// dialTarget checks and connects to what a relay asked for. On failure it
-// returns the HTTP status and a message for the relay.
-func (s *Server) dialTarget(ctx context.Context, target string) (net.Conn, int, string) {
-	host, port, err := net.SplitHostPort(target)
-	if n, perr := strconv.Atoi(port); err != nil || perr != nil || n < 1 || n > 65535 {
-		return nil, http.StatusBadRequest, "bad target"
-	}
-	if !s.AnyTarget && !loopback(host) {
-		if time.Now().Unix()-s.refusedNoted.Swap(time.Now().Unix()) > 60 {
-			s.Log.Warn("refused a target on another machine; set any_target in the config to allow it", "target", target)
-		}
-		return nil, http.StatusForbidden, "only this machine's ports may be reached"
-	}
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	up, err := s.dialer.DialContext(ctx, "tcp", target)
-	if err != nil {
-		return nil, http.StatusBadGateway, "nothing answers on " + target
-	}
-	return up, 0, ""
-}
-
 func loopback(host string) bool {
 	if strings.EqualFold(host, "localhost") {
 		return true
@@ -285,9 +329,25 @@ func loopback(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-func (s *Server) seen(r *http.Request, delta int64) {
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	s.seenIP(ip, delta)
+func hostOf(a net.Addr) string { return hostOfString(a.String()) }
+
+func hostOfString(s string) string {
+	h, _, err := net.SplitHostPort(s)
+	if err != nil {
+		return s
+	}
+	return h
+}
+
+func (s *Server) begin(ip string) {
+	s.open.Add(1)
+	s.total.Add(1)
+	s.seenIP(ip, 1)
+}
+
+func (s *Server) end(ip string) {
+	s.open.Add(-1)
+	s.seenIP(ip, -1)
 }
 
 func (s *Server) seenIP(ip string, delta int64) {
@@ -320,6 +380,8 @@ type ServerStats struct {
 	Up     int64         `json:"up"`
 	Down   int64         `json:"down"`
 	Relays []RelayStatus `json:"relays"`
+	QUIC   bool          `json:"quic"`
+	Links  []LinkStatus  `json:"links,omitempty"`
 }
 
 func (s *Server) Stats() ServerStats {
@@ -333,7 +395,21 @@ func (s *Server) Stats() ServerStats {
 		}
 		st.Relays = append(st.Relays, RelayStatus{IP: ip, LastSeen: rs.last.Unix(), Open: rs.open})
 	}
+	st.QUIC = s.qln != nil
+	for _, l := range s.links {
+		st.Links = append(st.Links, l.status())
+	}
 	s.mu.Unlock()
 	sort.Slice(st.Relays, func(i, j int) bool { return st.Relays[i].IP < st.Relays[j].IP })
+	sort.Slice(st.Links, func(i, j int) bool { return st.Links[i].Addr < st.Links[j].Addr })
 	return st
 }
+
+// peekConn is a connection whose first bytes have been looked at.
+type peekConn struct {
+	net.Conn
+	br *bufio.Reader
+}
+
+func (c *peekConn) Read(p []byte) (int, error) { return c.br.Read(p) }
+func (c *peekConn) CloseWrite() error          { return closeWrite(c.Conn) }

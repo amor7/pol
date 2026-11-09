@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/amor7/pol/internal/config"
 )
 
 const (
@@ -144,6 +146,41 @@ func closePorts(ports []int) {
 		_ = run("ufw", "delete", "allow", strconv.Itoa(p)+"/tcp")
 	}
 	info("closed in ufw: %s", joinInts(ports))
+}
+
+// openUDP lets UDP ports through ufw (quic mode, UDP forwards).
+func openUDP(ports []int) {
+	if len(ports) == 0 || !ufwActive() {
+		return
+	}
+	for _, p := range ports {
+		_ = run("ufw", "allow", strconv.Itoa(p)+"/udp")
+	}
+	okf("opened in ufw: %s (UDP)", joinInts(ports))
+}
+
+// openForwards and closeForwards follow each forward's protocol.
+func openForwards(fs []config.Forward) {
+	var tcp, udp []int
+	for _, f := range fs {
+		if f.UDP() {
+			udp = append(udp, f.Listen)
+		} else {
+			tcp = append(tcp, f.Listen)
+		}
+	}
+	openPorts(tcp)
+	openUDP(udp)
+}
+
+func closeForwards(fs []config.Forward) {
+	if len(fs) == 0 || !ufwActive() {
+		return
+	}
+	for _, f := range fs {
+		_ = run("ufw", "delete", "allow", strconv.Itoa(f.Listen)+"/"+f.ProtoName())
+	}
+	info("closed in ufw")
 }
 
 func joinInts(ns []int) string {
