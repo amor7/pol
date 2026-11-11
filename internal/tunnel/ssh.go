@@ -259,7 +259,7 @@ func (c *SSHClient) Watch(ctx context.Context) {
 			}
 			c.mu.Unlock()
 			return
-		case <-time.After(15 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 	}
 }

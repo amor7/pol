@@ -219,7 +219,7 @@ func (c *Client) Watch(ctx context.Context) {
 		wg.Wait()
 	}
 	check()
-	t := time.NewTicker(15 * time.Second)
+	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
 		select {

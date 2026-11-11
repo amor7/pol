@@ -36,7 +36,7 @@ func printModes(numbered bool) []string {
 				rec = green(" (default)")
 			}
 			fmt.Printf("   %s %-8s %s%s\n", num, bold(in.Mode), in.About, rec)
-			fmt.Printf("       %-8s %s  %s\n", "", yellow(strings.Join(in.Tags, " · ")), dim("(traffic: "+in.Overhead+")"))
+			fmt.Printf("       %-8s %s  %s\n", "", yellow(strings.Join(in.Tags, " · ")), dim("(traffic: "+in.Cost()+")"))
 			if in.Needs != "" {
 				fmt.Printf("       %-8s %s\n", "", dim("needs: "+in.Needs))
 			}
@@ -48,7 +48,10 @@ func printModes(numbered bool) []string {
 func cmdModes() error {
 	printModes(false)
 	fmt.Println()
-	info("traffic is what a mode adds to your users' own, measured on a clean link;")
+	info("traffic is what a mode adds to your users' own, measured on a clean link:")
+	info("  on transfers - per byte moved; what big downloads cost")
+	info("  per connection - to open one; what web pages and apps, with many short connections, cost")
+	info("  a day idle - keeping it ready, only while a port uses the mode")
 	info("packet headers (a few %% for every mode) and resends on a lossy path come on top.")
 	info("`pol speedtest` measures every mode on your own servers.")
 	return nil

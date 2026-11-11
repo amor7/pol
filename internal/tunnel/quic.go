@@ -25,8 +25,8 @@ import (
 func quicConfig() *quic.Config {
 	return &quic.Config{
 		HandshakeIdleTimeout:           15 * time.Second,
-		MaxIdleTimeout:                 45 * time.Second,
-		KeepAlivePeriod:                10 * time.Second,
+		MaxIdleTimeout:                 60 * time.Second,
+		KeepAlivePeriod:                20 * time.Second,
 		MaxIncomingStreams:             8192,
 		InitialStreamReceiveWindow:     1 << 20,
 		MaxStreamReceiveWindow:         16 << 20,

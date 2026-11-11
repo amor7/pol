@@ -71,8 +71,8 @@ func tuneKCP(s *kcp.UDPSession, p KCPProfile) {
 func smuxConfig() *smux.Config {
 	c := smux.DefaultConfig()
 	c.Version = 2
-	c.KeepAliveInterval = 10 * time.Second
-	c.KeepAliveTimeout = 40 * time.Second
+	c.KeepAliveInterval = 20 * time.Second
+	c.KeepAliveTimeout = 60 * time.Second
 	c.MaxReceiveBuffer = 16 << 20
 	c.MaxStreamBuffer = 2 << 20
 	return c
@@ -292,7 +292,7 @@ func (k *KCPClient) Watch(ctx context.Context) {
 			}
 			k.mu.Unlock()
 			return
-		case <-time.After(15 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
 	}
 }

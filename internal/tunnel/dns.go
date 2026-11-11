@@ -32,11 +32,11 @@ import (
 var b32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 const (
-	dnsHeader    = 10                     // client id + nonce
-	dnsServerMTU = 800                    // packet bytes per answer
-	dnsHold      = 400 * time.Millisecond // an empty poll waits this long for data
-	dnsPollsIdle = 2                      // queries kept in flight when quiet
-	dnsPollsBusy = 24                     // and when data is moving
+	dnsHeader    = 10          // client id + nonce
+	dnsServerMTU = 800         // packet bytes per answer
+	dnsHold      = time.Second // an empty poll waits this long for data
+	dnsPollsIdle = 1           // queries kept in flight when quiet
+	dnsPollsBusy = 24          // and when data is moving
 	dnsQueryWait = 4 * time.Second
 )
 

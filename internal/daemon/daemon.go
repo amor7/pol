@@ -260,34 +260,35 @@ func startTunnels(ctx context.Context, r *config.Relay, dir string, log *slog.Lo
 	}
 
 	t.mux = tunnel.NewClient(r.Server, r.Fingerprint, r.Secret, r.SNI, r.Conns, log)
-	tls := tunnel.NewRawClient(r.Server, r.Fingerprint, r.Secret, r.SNI, 4, log)
+	tls := tunnel.NewRawClient(r.Server, r.Fingerprint, r.Secret, r.SNI, 2, log)
 	splitConns := r.SplitConns
 	if splitConns == 0 {
 		splitConns = 4
 	}
 	split := tunnel.NewSplitClient(tls, r.Secret, splitConns)
 	quic := tunnel.NewQUICClient(r.Server, r.Fingerprint, r.Secret, r.SNI, log)
-	obfs := tunnel.NewObfsClient(r.Server, r.Secret, 2, log)
+	obfs := tunnel.NewObfsClient(r.Server, r.Secret, 1, log)
 	wc := tunnel.WSConfig{Server: r.Server, Fingerprint: r.Fingerprint, SNI: r.SNI}
 	if r.CDN != nil {
 		wc.CDN, wc.CDNAddr, wc.CDNPort = r.CDN.Host, r.CDN.Addr, r.CDN.Port
 	}
-	ws := tunnel.NewWSClient(wc, r.Secret, 2, log)
-	xh := tunnel.NewXHTTPClient(wc, r.Secret, 2, log)
+	ws := tunnel.NewWSClient(wc, r.Secret, 1, log)
+	xh := tunnel.NewXHTTPClient(wc, r.Secret, 1, log)
 	camo := tunnel.NewCamoClient(r.Server, r.Camo, r.Secret, 1, log)
 	ssh := tunnel.NewSSHClient(r.Server, r.Fingerprint, r.Secret, r.SNI, log)
 	kcp := tunnel.NewKCPClient(net.JoinHostPort(host, strconv.Itoa(extra.KCP)), r.Secret, log)
 	hop := tunnel.NewHopClient(host, extra.HopLo, extra.HopHi, r.Secret, log)
 	ftcp := tunnel.NewFakeTCPClient(host, extra.FakeTCP, r.Secret, log)
 
-	// The pools that cost nothing to keep are always warm; the rest connect
-	// once a port uses them.
-	add(config.ModeTLS, tls, tls.Status, nil).on = true
-	go tls.Watch(ctx)
-	add(config.ModeSplit, split, split.Status, nil)
+	// Every mode keeps connections ready only once a port uses it: kept
+	// ready, each costs some traffic a day even with nobody on it. Until
+	// then a mode connects when it is needed. tls and split share a pool.
+	var tlsOnce sync.Once
+	warmTLS := func(ctx context.Context) { tlsOnce.Do(func() { go tls.Watch(ctx) }) }
+	add(config.ModeTLS, tls, tls.Status, warmTLS)
+	add(config.ModeSplit, split, split.Status, warmTLS)
 	add(config.ModeQUIC, quic, quic.Status, quic.Watch)
-	add(config.ModeMux, t.mux, t.mux.Mode, nil).on = true
-	go t.mux.Watch(ctx)
+	add(config.ModeMux, t.mux, t.mux.Mode, t.mux.Watch)
 	add(config.ModeObfs, obfs, obfs.Status, obfs.Watch)
 	add(config.ModeCamo, camo, camo.Status, camo.Watch)
 	add(config.ModeWS, ws, func() tunnel.ModeStatus {

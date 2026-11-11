@@ -33,7 +33,7 @@ import (
 // connection the server has just closed.
 const (
 	rawPreambleWait = 60 * time.Second
-	poolMaxAge      = 40 * time.Second
+	poolMaxAge      = 52 * time.Second
 )
 
 // serveLine reads the first line of a connection and serves it. wait bounds
@@ -242,7 +242,7 @@ func (d *LineDialer) Watch(ctx context.Context) {
 		for range len(d.pool) {
 			select {
 			case p := <-d.pool:
-				if time.Since(p.at) < poolMaxAge-10*time.Second {
+				if time.Since(p.at) < poolMaxAge-8*time.Second {
 					d.pool <- p
 				} else {
 					p.c.Close()

@@ -30,7 +30,7 @@ import (
 const (
 	reverseIdle   = 50 * time.Second // the server replaces a waiting connection after this
 	reverseMaxAge = 40 * time.Second // the relay uses waiting connections younger than this
-	reverseWarm   = 8
+	reverseWarm   = 3
 )
 
 // ---------------------------------------------------------------- relay side

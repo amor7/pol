@@ -438,7 +438,7 @@ func (s *Server) Stats() ServerStats {
 	st := ServerStats{Open: s.open.Load(), Total: s.total.Load(), Up: s.up.Load(), Down: s.down.Load(), Relays: []RelayStatus{}}
 	s.mu.Lock()
 	for ip, rs := range s.relays {
-		// Relays ping every 15 seconds; one quiet for ten minutes is gone.
+		// Relays ping every 30 seconds; one quiet for ten minutes is gone.
 		if rs.open <= 0 && time.Since(rs.last) > 10*time.Minute {
 			delete(s.relays, ip)
 			continue

@@ -47,6 +47,8 @@ const (
 	TagUDPBlock = "gets past UDP throttling"
 	TagIPBlock  = "server IP blocked"
 	TagEmerg    = "emergency only"
+	TagShort    = "many short connections: web, apps"
+	TagBig      = "big downloads"
 )
 
 // Info describes a mode for the people choosing one.
@@ -61,26 +63,48 @@ type Info struct {
 	// on a lossy path come on top.
 	Overhead string
 	Needs    string // what it needs beyond the tunnel port, if anything
+	// PerConn is the extra bytes to open one connection (handshakes and
+	// setup): it is what matters for web pages and apps, which open many
+	// short ones. Idle is what keeping the mode ready costs a day with
+	// nobody on it - only while a port uses the mode. Both measured with
+	// TestCostProbe.
+	PerConn string
+	Idle    string
+}
+
+// Cost is all three costs on one line.
+func (in Info) Cost() string {
+	if in.PerConn == "" && in.Idle == "" {
+		return in.Overhead
+	}
+	parts := []string{in.Overhead + " on transfers"}
+	if in.PerConn != "" {
+		parts = append(parts, in.PerConn+" per connection")
+	}
+	if in.Idle != "" {
+		parts = append(parts, in.Idle+" a day idle")
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Infos is every mode, in the order menus show them.
 var Infos = []Info{
-	{ModeAuto, GroupFast, "picks the best working mode by itself and switches when one fails", []string{"no babysitting"}, "about 100 MB a day for its checks", ""},
-	{ModeTLS, GroupFast, "a TLS connection per user connection", []string{TagDownload, TagUpload}, "+1%", ""},
-	{ModeSplit, GroupFast, "each user connection spread over 4 TLS connections", []string{TagDownload, TagUpload, "beats per-connection throttling"}, "+1%", ""},
-	{ModeObfs, GroupStealth, "encrypted TCP with no TLS handshake: looks like noise", []string{TagDownload, TagStealth}, "under +1%", ""},
-	{ModeCamo, GroupStealth, "borrows a real website's TLS (www.microsoft.com); probers get the real site", []string{TagStealth, "strongest against probing"}, "+1%", ""},
-	{ModeMux, GroupStealth, "everything inside a few HTTP/2 connections: one HTTPS session from outside", []string{TagStealth}, "+1%", ""},
-	{ModeSSH, GroupStealth, "one real SSH connection, a channel per user connection: looks like server admin", []string{TagStealth}, "+1%", ""},
-	{ModeWS, GroupCDN, "a WebSocket per user connection", []string{TagCDN, TagIPBlock}, "+1%", "a CDN domain for the IP-blocked case (pol cdn)"},
-	{ModeXHTTP, GroupCDN, "plain HTTP requests: one long GET down, POSTs up", []string{TagCDN, TagIPBlock, "looks like web browsing"}, "+1%", "a CDN domain for the IP-blocked case (pol cdn)"},
-	{ModeQUIC, GroupUDP, "streams of one QUIC connection over UDP", []string{TagLossy, TagGaming}, "+3%", "UDP on the tunnel port"},
-	{ModeKCP, GroupUDP, "KCP over UDP, lost packets rebuilt from spare data", []string{TagGaming, TagLossy}, "+45-75%", "UDP tunnel port + 1"},
-	{ModeHop, GroupUDP, "KCP over UDP, changing port every 30 seconds", []string{TagGaming, TagUDPBlock}, "+45-75%", "UDP tunnel port + 10 to + 29"},
-	{ModeFakeTCP, GroupUDP, "KCP packets dressed as TCP", []string{TagGaming, TagUDPBlock}, "+40-70%", "TCP tunnel port + 2, Linux and iptables on both ends"},
-	{ModeReverse, GroupSpecial, "the server connects to the relay instead", []string{"Iran-to-abroad connections cut"}, "+1%", "pol reverse on the relay, pol link on the server"},
-	{ModeDNS, GroupSpecial, "data inside DNS lookups, through any resolver", []string{TagEmerg, "only DNS gets out"}, "+130% down, +550% up, very slow", "a domain whose NS points at the server (pol dns)"},
-	{ModeDirect, GroupSpecial, "plain TCP/UDP straight to the port abroad, no tunnel", []string{"fastest", "nothing added"}, "0%", "the port open to the internet on the server"},
+	{ModeAuto, GroupFast, "picks the best working mode by itself and switches when one fails", []string{"no babysitting"}, "about 100 MB a day for its checks, plus the chosen mode's costs", "", "", ""},
+	{ModeTLS, GroupFast, "a TLS connection per user connection", []string{TagDownload, TagUpload}, "+1%", "", "+3.5 kB", "14 MB"},
+	{ModeSplit, GroupFast, "each user connection spread over 4 TLS connections", []string{TagDownload, TagUpload, TagBig, "beats per-connection throttling"}, "+1%", "", "+14 kB", "15 MB"},
+	{ModeObfs, GroupStealth, "encrypted TCP with no TLS handshake: looks like noise", []string{TagDownload, TagStealth, TagShort}, "under +1%", "", "+0.2 kB", "2.5 MB"},
+	{ModeCamo, GroupStealth, "borrows a real website's TLS (www.microsoft.com); probers get the real site", []string{TagStealth, "strongest against probing"}, "+1%", "", "+4 kB or more (the site's certificates)", "7 MB"},
+	{ModeMux, GroupStealth, "everything inside a few HTTP/2 connections: one HTTPS session from outside", []string{TagStealth, TagShort}, "+1%", "", "+0.2 kB", "24 MB"},
+	{ModeSSH, GroupStealth, "one real SSH connection, a channel per user connection: looks like server admin", []string{TagStealth, TagShort}, "+1%", "", "+0.4 kB", "1.5 MB"},
+	{ModeWS, GroupCDN, "a WebSocket per user connection", []string{TagCDN, TagIPBlock}, "+1%", "a CDN domain for the IP-blocked case (pol cdn)", "+4 kB", "9 MB"},
+	{ModeXHTTP, GroupCDN, "plain HTTP requests: one long GET down, POSTs up", []string{TagCDN, TagIPBlock, "looks like web browsing"}, "+1%", "a CDN domain for the IP-blocked case (pol cdn)", "+0.5 kB", "2 MB"},
+	{ModeQUIC, GroupUDP, "streams of one QUIC connection over UDP", []string{TagLossy, TagGaming}, "+3%", "UDP on the tunnel port", "+0.7 kB", "5 MB"},
+	{ModeKCP, GroupUDP, "KCP over UDP, lost packets rebuilt from spare data", []string{TagGaming, TagLossy}, "+45-75%", "UDP tunnel port + 1", "+6 kB", "8 MB"},
+	{ModeHop, GroupUDP, "KCP over UDP, changing port every 30 seconds", []string{TagGaming, TagUDPBlock}, "+45-75%", "UDP tunnel port + 10 to + 29", "about +6 kB", "about 8 MB"},
+	{ModeFakeTCP, GroupUDP, "KCP packets dressed as TCP", []string{TagGaming, TagUDPBlock}, "+40-70%", "TCP tunnel port + 2, Linux and iptables on both ends", "about +6 kB", "about 8 MB"},
+	{ModeReverse, GroupSpecial, "the server connects to the relay instead", []string{"Iran-to-abroad connections cut"}, "+1%", "pol reverse on the relay, pol link on the server", "+0.2 kB", "about 15 MB"},
+	{ModeDNS, GroupSpecial, "data inside DNS lookups, through any resolver", []string{TagEmerg, "only DNS gets out"}, "+130% down, +550% up, very slow", "a domain whose NS points at the server (pol dns)", "large", "about 15 MB"},
+	{ModeDirect, GroupSpecial, "plain TCP/UDP straight to the port abroad, no tunnel", []string{"fastest", "nothing added"}, "0%", "the port open to the internet on the server", "0", "0"},
 }
 
 // Modes lists the modes in the order menus show them.
@@ -108,7 +132,7 @@ func InfoOf(mode string) Info {
 
 // Label is a mode with its tags and traffic, for one menu line.
 func (in Info) Label() string {
-	return in.Mode + " - " + in.About + " [" + strings.Join(in.Tags, ", ") + "] (traffic: " + in.Overhead + ")"
+	return in.Mode + " - " + in.About + " [" + strings.Join(in.Tags, ", ") + "] (" + in.Cost() + ")"
 }
 
 // ModeOf is the forward's mode; ports saved before modes existed are mux.

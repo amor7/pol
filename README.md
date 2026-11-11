@@ -43,53 +43,59 @@ Run the installer again later, without arguments, to update.
 
 Every port has its own mode; change it any time with `pol mode <port> <mode>`. `pol modes` prints this list on the server.
 
-**Traffic** is what a mode adds on top of your users' own data. It was measured (`TestOverhead`) on a clean link. Packet headers (a few % for every mode) and resends on a lossy path come on top.
+**Traffic** is what a mode adds on top of your users' own data, in three parts, all measured on a clean link (`TestOverhead`, `TestCostProbe`):
+
+- **on transfers**: per byte moved; what a big download costs.
+- **per connection**: to open one; what web pages and apps cost, since they open many short connections. That is where tls and split cost the most, and obfs, mux and ssh the least.
+- **a day idle**: keeping the mode ready with nobody on it. A mode is kept ready only while a port uses it.
+
+Packet headers (a few % for every mode) and resends on a lossy path come on top.
 
 ### Fast
 
 | Mode | How it travels | Good for | Traffic |
 |---|---|---|---|
-| **auto** | ranks the other modes and uses the best one that works; switches at once when one fails | not having to watch it | ~100 MB a day for its checks |
-| **tls** *(default)* | a TLS connection per user connection, from a pool kept ready | **high-speed download, high-speed upload** | +1% |
-| **split** | each user connection spread over 4 TLS connections at once, reassembled in order | **high-speed download and upload**, even for one big file; beats per-connection throttling | +1% |
+| **auto** | ranks the other modes and uses the best one that works; switches at once when one fails | not having to watch it | ~100 MB a day for its checks + the chosen mode's |
+| **tls** *(default)* | a TLS connection per user connection, from a pool kept ready | **high-speed download, high-speed upload** | +1% · +3.5 kB per connection · 14 MB/day idle |
+| **split** | each user connection spread over 4 TLS connections at once, reassembled in order | **high-speed download and upload**, even for one big file; beats per-connection throttling | +1% · **+14 kB per connection** · 15 MB/day idle |
 
 ### Stealth
 
 | Mode | How it travels | Good for | Traffic |
 |---|---|---|---|
-| **obfs** | TCP carrying an AES stream, no TLS handshake, random padding | **high-speed download**; looks like noise from the first byte | under +1% |
-| **camo** | borrows a real website's TLS (Chrome's handshake, the site's real certificate); anyone without the secret gets the real site | **hardest to detect**, strongest against active probing | +1% |
-| **mux** | everything as streams inside a few HTTP/2 connections | one long HTTPS session from outside | +1% |
-| **ssh** | one real SSH connection, a channel per user connection | looks like server administration | +1% |
+| **obfs** | TCP carrying an AES stream, no TLS handshake, random padding | **high-speed download**; looks like noise from the first byte | under +1% · +0.2 kB per connection · 2.5 MB/day idle |
+| **camo** | borrows a real website's TLS (Chrome's handshake, the site's real certificate); anyone without the secret gets the real site | **hardest to detect**, strongest against active probing | +1% · +4 kB or more per connection · 7 MB/day idle |
+| **mux** | everything as streams inside a few HTTP/2 connections | one long HTTPS session from outside | +1% · +0.2 kB per connection · 24 MB/day idle |
+| **ssh** | one real SSH connection, a channel per user connection | looks like server administration | +1% · +0.4 kB per connection · 1.5 MB/day idle |
 
 ### CDN
 
 | Mode | How it travels | Good for | Traffic |
 |---|---|---|---|
-| **ws** | a WebSocket per user connection | going **through Cloudflare** when the server's IP is blocked (`pol cdn`) | +1% |
-| **xhttp** | plain HTTP: one long GET down, numbered POSTs up | through CDNs and proxies that carry **only ordinary requests**; looks like web browsing | +1% |
+| **ws** | a WebSocket per user connection | going **through Cloudflare** when the server's IP is blocked (`pol cdn`) | +1% · +4 kB per connection · 9 MB/day idle |
+| **xhttp** | plain HTTP: one long GET down, numbered POSTs up | through CDNs and proxies that carry **only ordinary requests**; looks like web browsing | +1% · +0.5 kB per connection · 2 MB/day idle |
 
 ### UDP
 
 | Mode | How it travels | Good for | Traffic |
 |---|---|---|---|
-| **quic** | streams of one QUIC connection | **lossy networks, low ping** | +3% |
-| **kcp** | KCP over UDP, lost packets rebuilt from spare data (FEC) | **gaming / lowest ping** on lossy paths | **+45–75%** |
-| **hop** | kcp, changing UDP port every 30 seconds | gaming where **one UDP port gets slowed down** after a while | **+45–75%** |
-| **faketcp** | kcp's packets dressed as TCP segments | gaming where **UDP as a whole is throttled** | **+40–70%** |
+| **quic** | streams of one QUIC connection | **lossy networks, low ping** | +3% · +0.7 kB per connection · 5 MB/day idle |
+| **kcp** | KCP over UDP, lost packets rebuilt from spare data (FEC) | **gaming / lowest ping** on lossy paths | **+45–75%** · +6 kB per connection · 8 MB/day idle |
+| **hop** | kcp, changing UDP port every 30 seconds | gaming where **one UDP port gets slowed down** after a while | **+45–75%** · ~+6 kB per connection · ~8 MB/day idle |
+| **faketcp** | kcp's packets dressed as TCP segments | gaming where **UDP as a whole is throttled** | **+40–70%** · ~+6 kB per connection · ~8 MB/day idle |
 
 ### Special
 
 | Mode | How it travels | Good for | Traffic |
 |---|---|---|---|
-| **reverse** | the server connects to the relay, not the other way round | when connections **from Iran out** are cut but ones coming in are not | +1% |
-| **dns** | data inside DNS lookups, through any resolver | **emergency only**: when nothing but DNS gets out. Slow: tens to a few hundred kbit/s | **+130% down, +550% up** |
+| **reverse** | the server connects to the relay, not the other way round | when connections **from Iran out** are cut but ones coming in are not | +1% · +0.2 kB per connection · ~15 MB/day idle |
+| **dns** | data inside DNS lookups, through any resolver | **emergency only**: when nothing but DNS gets out. Slow: tens to a few hundred kbit/s | **+130% down, +550% up** · ~15 MB/day idle |
 | **direct** | plain TCP/UDP straight to the port abroad, no pol in between | the fastest, nothing added; the service's own encryption is all there is | 0% |
 
 ### Which one?
 
 1. Run `pol speedtest` on the relay. It measures every mode through your real path, four connections at a time as a phone would, ranks them and shows each one's traffic cost.
-2. Put the port on the winner (`pol mode 2088 split`), or on `auto` to let pol keep choosing.
+2. Put the port on the winner (`pol mode 2088 mux`), or on `auto` to let pol keep choosing. For ordinary use (web, apps: many short connections) prefer **mux or obfs**: about as fast, and far cheaper per connection than tls or split. Keep **split** for big downloads.
 3. For games, try quic first; kcp, hop and faketcp give lower ping on bad paths, but cost much more traffic.
 4. Keep a ws or xhttp port through a CDN ready for the day the server's IP is blocked.
 
