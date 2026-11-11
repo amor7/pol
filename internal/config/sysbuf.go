@@ -6,10 +6,10 @@ import (
 	"strings"
 )
 
-// SmallUDPBuffers reports whether the kernel caps socket buffers so low
-// that a burst overflows them: kcp, hop, faketcp and quic then lose most of
-// a burst and can stall. `pol tune` raises the cap. False where it cannot
-// tell (not Linux).
+// SmallUDPBuffers reports whether the kernel caps socket buffers low
+// enough that a burst can overflow them, costing kcp, hop, faketcp and quic
+// speed (quic-go warns about the same). `pol tune` raises the cap. False
+// where it cannot tell (not Linux).
 func SmallUDPBuffers() bool {
 	b, err := os.ReadFile("/proc/sys/net/core/rmem_max")
 	if err != nil {
@@ -20,4 +20,4 @@ func SmallUDPBuffers() bool {
 }
 
 // SmallBuffersHint is what pol says when SmallUDPBuffers.
-const SmallBuffersHint = "UDP buffers are small on this machine: kcp, hop, faketcp and quic lose speed or stall under load - run `pol tune`"
+const SmallBuffersHint = "UDP buffers are small on this machine: kcp, hop, faketcp and quic may lose speed under load - `pol tune` raises them"
