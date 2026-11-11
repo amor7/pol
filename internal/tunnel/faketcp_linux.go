@@ -19,11 +19,16 @@ import (
 )
 
 // The faketcp mode: KCP's packets, each sent as a TCP segment over a raw
-// socket. The two ends go through a real-looking three-way handshake, so
-// firewalls and NATs that follow TCP connections let the flow through, and
-// networks that slow UDP down see TCP instead. The kernel's own TCP stack
-// would answer these segments with resets, so pol drops outgoing resets for
-// the port with an iptables rule while the mode is in use.
+// socket. The two ends go through a real three-way handshake (with MSS and
+// window scaling, as a real stack sends), keep their sequence and
+// acknowledgement numbers consistent and their window wide open, so
+// firewalls, NATs and connection trackers that follow TCP see an ordinary
+// connection, and networks that slow UDP down see TCP instead.
+//
+// The kernel's own TCP stack would answer these segments with resets. pol
+// drops those in the raw table, before connection tracking can see them -
+// dropped later, the tracker would already have marked the flow closed and
+// every packet after it invalid.
 
 const (
 	tcpFIN = 0x01
@@ -63,8 +68,8 @@ func openFakeTCP(lport uint16, rule []string) (*fakeTCP, error) {
 	}
 	f := &fakeTCP{raw: raw, pc: pc, lport: lport, rule: rule}
 	if rule != nil {
-		if exec.Command("iptables", append([]string{"-C"}, rule...)...).Run() != nil {
-			if out, err := exec.Command("iptables", append([]string{"-I"}, rule...)...).CombinedOutput(); err != nil {
+		if exec.Command("iptables", append([]string{"-t", "raw", "-C"}, rule...)...).Run() != nil {
+			if out, err := exec.Command("iptables", append([]string{"-t", "raw", "-I"}, rule...)...).CombinedOutput(); err != nil {
 				raw.Close()
 				return nil, errors.New("faketcp: iptables: " + string(out))
 			}
@@ -79,7 +84,7 @@ func (f *fakeTCP) close() {
 	f.once.Do(func() {
 		f.raw.Close()
 		if f.rule != nil {
-			_ = exec.Command("iptables", append([]string{"-D"}, f.rule...)...).Run()
+			_ = exec.Command("iptables", append([]string{"-t", "raw", "-D"}, f.rule...)...).Run()
 		}
 	})
 }
@@ -121,19 +126,42 @@ func (f *fakeTCP) read(buf []byte) (segment, error) {
 	}
 }
 
+// synOptions are what a Linux stack puts in a SYN, minus SACK and
+// timestamps: MSS 1460, then a window scale of 14 - so the window each end
+// advertises is wide enough that the other's segments never fall outside
+// it, which trackers would count as invalid.
+var synOptions = []byte{2, 4, 0x05, 0xb4, 1, 3, 3, 14}
+
 func (f *fakeTCP) write(s segment) error {
-	b := make([]byte, 20+len(s.payload))
+	var opts []byte
+	if s.flags&tcpSYN != 0 {
+		opts = synOptions
+	}
+	hl := 20 + len(opts)
+	b := make([]byte, hl+len(s.payload))
 	binary.BigEndian.PutUint16(b, s.sport)
 	binary.BigEndian.PutUint16(b[2:], s.dport)
 	binary.BigEndian.PutUint32(b[4:], s.seq)
 	binary.BigEndian.PutUint32(b[8:], s.ack)
-	b[12] = 5 << 4
+	b[12] = byte(hl/4) << 4
 	b[13] = s.flags
-	binary.BigEndian.PutUint16(b[14:], 64240) // window
-	copy(b[20:], s.payload)
+	binary.BigEndian.PutUint16(b[14:], 0xffff) // scaled by 2^14 after the handshake
+	copy(b[20:], opts)
+	copy(b[hl:], s.payload)
 	binary.BigEndian.PutUint16(b[16:], tcpChecksum(s.src, s.dst, b))
 	_, err := f.raw.WriteToIP(b, &net.IPAddr{IP: s.dst})
 	return err
+}
+
+// advance moves an acknowledgement number forward to v, never back - a late
+// segment must not make the acknowledgements go backwards.
+func advance(a *atomic.Uint32, v uint32) {
+	for {
+		cur := a.Load()
+		if int32(v-cur) <= 0 || a.CompareAndSwap(cur, v) {
+			return
+		}
+	}
 }
 
 func tcpChecksum(src, dst net.IP, seg []byte) uint16 {
@@ -234,7 +262,7 @@ func (s *ftServer) loop() {
 		if len(seg.payload) == 0 {
 			continue
 		}
-		p.ack.Store(seg.seq + uint32(len(seg.payload)))
+		advance(&p.ack, seg.seq+uint32(len(seg.payload)))
 		b := make([]byte, len(seg.payload))
 		copy(b, seg.payload)
 		select {
@@ -362,7 +390,7 @@ func (c *ftClient) loop() {
 		if len(seg.payload) == 0 {
 			continue
 		}
-		c.ack.Store(seg.seq + uint32(len(seg.payload)))
+		advance(&c.ack, seg.seq+uint32(len(seg.payload)))
 		b := make([]byte, len(seg.payload))
 		copy(b, seg.payload)
 		select {

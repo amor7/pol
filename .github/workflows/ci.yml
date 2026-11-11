@@ -19,4 +19,6 @@ jobs:
       - run: bash -n install.sh
       # faketcp needs raw sockets and iptables: only as root.
       - name: faketcp, as root
-        run: sudo -E "$(command -v go)" test -count=1 -v -run 'TestForwardEcho/faketcp|TestLargeDownloadAndHalfClose/faketcp|TestLargeUploadIntact/faketcp|TestUDP/faketcp|TestSpeedThroughEveryMode/faketcp' ./internal/
+        run: |
+          sudo -E "$(command -v go)" test -count=1 -v -run 'TestForwardEcho/faketcp|TestLargeDownloadAndHalfClose/faketcp|TestLargeUploadIntact/faketcp|TestUDP/faketcp|TestSpeedThroughEveryMode/faketcp' ./internal/ || {
+            echo "--- firewall, for diagnosis"; sudo iptables -S; sudo iptables -t raw -S; sudo nft list ruleset | head -80; exit 1; }
