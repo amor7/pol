@@ -119,14 +119,17 @@ func (m *multiPC) SetWriteDeadline(time.Time) error { return nil }
 // expects of its peer.
 type hopConn struct {
 	*net.UDPConn
-	host    net.IP
-	lo, hi  int
-	cur     atomic.Int32
-	since   atomic.Int64 // when cur was chosen
-	lastIn  atomic.Int64 // when anything last arrived
-	fixed   *net.UDPAddr
-	stop    chan struct{}
-	stopped sync.Once
+	host     net.IP
+	lo, hi   int
+	cur      atomic.Int32
+	since    atomic.Int64 // when cur was chosen
+	lastIn   atomic.Int64 // when anything last arrived
+	firstOut atomic.Int64 // when something was first sent to cur (0: nothing yet)
+	fixed    *net.UDPAddr
+	stop     chan struct{}
+	stopped  sync.Once
+	mu       sync.Mutex
+	bad      map[int]time.Time // ports that did not answer, and until when to avoid them
 }
 
 func newHopConn(host string, lo, hi int) (*hopConn, error) {
@@ -144,13 +147,37 @@ func newHopConn(host string, lo, hi int) (*hopConn, error) {
 	return h, nil
 }
 
+// move picks another port of the range, avoiding ones that did not answer
+// lately - the server may not have been able to open them, or something on
+// the way drops them.
 func (h *hopConn) move() {
-	h.cur.Store(int32(h.lo + rand.IntN(h.hi-h.lo+1)))
-	h.since.Store(time.Now().UnixMilli())
+	now := time.Now()
+	h.mu.Lock()
+	p := h.lo + rand.IntN(h.hi-h.lo+1)
+	for try := 0; try < 20; try++ {
+		cand := h.lo + rand.IntN(h.hi-h.lo+1)
+		if until, bad := h.bad[cand]; (!bad || now.After(until)) && (cand != int(h.cur.Load()) || h.hi == h.lo) {
+			p = cand
+			break
+		}
+	}
+	h.mu.Unlock()
+	h.firstOut.Store(0)
+	h.cur.Store(int32(p))
+	h.since.Store(now.UnixMilli())
 }
 
-// rotate moves on every hopEvery, and sooner when a port stays silent - it
-// may be one the server could not open.
+func (h *hopConn) markBad(p int) {
+	h.mu.Lock()
+	if h.bad == nil {
+		h.bad = map[int]time.Time{}
+	}
+	h.bad[p] = time.Now().Add(2 * time.Minute)
+	h.mu.Unlock()
+}
+
+// rotate moves on every hopEvery, and at once when a port that was sent to
+// does not answer - it may be one the server could not open.
 func (h *hopConn) rotate() {
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
@@ -162,8 +189,13 @@ func (h *hopConn) rotate() {
 			now := time.Now().UnixMilli()
 			since := h.since.Load()
 			age := time.Duration(now-since) * time.Millisecond
-			silent := h.lastIn.Load() < since
-			if age >= hopEvery || (silent && age >= 3*time.Second) {
+			first := h.firstOut.Load()
+			unanswered := first != 0 && h.lastIn.Load() < since && now-first >= 2000
+			switch {
+			case unanswered:
+				h.markBad(int(h.cur.Load()))
+				h.move()
+			case age >= hopEvery:
 				h.move()
 			}
 		}
@@ -171,6 +203,7 @@ func (h *hopConn) rotate() {
 }
 
 func (h *hopConn) WriteTo(p []byte, _ net.Addr) (int, error) {
+	h.firstOut.CompareAndSwap(0, time.Now().UnixMilli())
 	return h.UDPConn.WriteTo(p, &net.UDPAddr{IP: h.host, Port: int(h.cur.Load())})
 }
 

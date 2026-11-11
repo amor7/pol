@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -141,5 +142,56 @@ func TestMiddleHop(t *testing.T) {
 	n, err := tunnel.SpeedDown(context.Background(), toMid, 2)
 	if err != nil || n != 2<<20 {
 		t.Fatalf("speed through the hop: %d, %v", n, err)
+	}
+}
+
+// hop keeps working when part of its port range is dead on the server -
+// taken by something else, or blocked by a firewall on the way.
+func TestHopSkipsDeadPorts(t *testing.T) {
+	r := newRig(t)
+	var lo int
+	var held []net.PacketConn
+	var pc net.PacketConn
+	for try := 0; try < 50 && pc == nil; try++ {
+		lo = 30000 + int(time.Now().UnixNano()%30000)
+		held = held[:0]
+		ok := true
+		for _, p := range []int{lo + 1, lo + 2} { // these two the server cannot have
+			h, err := net.ListenPacket("udp", "127.0.0.1:"+strconv.Itoa(p))
+			if err != nil {
+				ok = false
+				break
+			}
+			held = append(held, h)
+		}
+		if ok {
+			pc, _ = tunnel.ListenHop("127.0.0.1", lo, lo+3, quiet)
+		}
+		if pc == nil {
+			for _, h := range held {
+				h.Close()
+			}
+		}
+	}
+	if pc == nil {
+		t.Fatal("no free port range")
+	}
+	// The held ports swallow what is sent to them, as a firewall would.
+	for _, h := range held {
+		defer h.Close()
+	}
+	go r.server.ServeKCP(pc, tunnel.ProfileHop)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hop := tunnel.NewHopClient("127.0.0.1", lo, lo+3, secret, quiet)
+	go hop.Watch(ctx)
+	target := service(t, echo)
+	for i := range 5 {
+		c, err := hop.Dial(target)
+		if err != nil {
+			t.Fatalf("connection %d: %v", i, err)
+		}
+		roundTrip(t, c, 256<<10)
+		c.Close()
 	}
 }
