@@ -23,7 +23,7 @@ import (
 
 func quicConfig() *quic.Config {
 	return &quic.Config{
-		HandshakeIdleTimeout:           10 * time.Second,
+		HandshakeIdleTimeout:           15 * time.Second,
 		MaxIdleTimeout:                 45 * time.Second,
 		KeepAlivePeriod:                10 * time.Second,
 		MaxIncomingStreams:             8192,
@@ -167,7 +167,9 @@ func (q *QUICClient) Dial(target string) (net.Conn, error) {
 	for range 2 {
 		c, err := q.get(context.Background())
 		if err != nil {
-			return nil, err
+			// A handshake can be lost like any packet: try once more.
+			last = err
+			continue
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), headerTimeout)
 		st, err := c.OpenStreamSync(ctx)
