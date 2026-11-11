@@ -52,6 +52,12 @@ func (s *Server) ServeQUICConn(pc net.PacketConn, cert tls.Certificate) error {
 		pc.Close()
 		return err
 	}
+	// As with KCP, closing the listener leaves the socket open: close both.
+	if !s.addCloser(pc) {
+		ln.Close()
+		pc.Close()
+		return nil
+	}
 	s.mu.Lock()
 	if s.closed.Load() {
 		s.mu.Unlock()

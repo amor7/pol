@@ -92,6 +92,7 @@ func udpListen(t *testing.T) net.PacketConn {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { pc.Close() })
 	return pc
 }
 
@@ -125,6 +126,7 @@ func newRig(t *testing.T) *rig {
 	if hopPC == nil {
 		t.Fatal("no free port range for hop")
 	}
+	t.Cleanup(func() { hopPC.Close() })
 	go s.ServeKCP(hopPC, tunnel.ProfileHop)
 	dnsPC := udpListen(t)
 	go s.ServeKCP(tunnel.ListenDNS(dnsPC, "t.test"), tunnel.ProfileDNSServer)

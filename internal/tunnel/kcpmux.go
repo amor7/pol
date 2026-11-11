@@ -98,8 +98,11 @@ func (s *Server) ServeKCP(pc net.PacketConn, p KCPProfile) error {
 		pc.Close()
 		return err
 	}
-	if !s.addCloser(l) {
+	// Closing a KCP listener leaves the socket it was given open: the
+	// server closes both.
+	if !s.addCloser(l) || !s.addCloser(pc) {
 		l.Close()
+		pc.Close()
 		return nil
 	}
 	for {
