@@ -147,13 +147,18 @@ func (x *xSession) Write(p []byte) (int, error) {
 // CloseWrite ends the GET: the handler returns once the stream is served.
 func (x *xSession) CloseWrite() error { return nil }
 
+// Close ends the session. It waits for a frame being written to finish and
+// stops any more: the response may not be written to once the handler that
+// owns it has returned, and the handler returns right after this.
 func (x *xSession) Close() error {
 	x.once.Do(func() {
 		x.mu.Lock()
 		x.closed = true
 		x.cond.Broadcast()
 		x.mu.Unlock()
+		x.wmu.Lock()
 		close(x.done)
+		x.wmu.Unlock()
 	})
 	return nil
 }
