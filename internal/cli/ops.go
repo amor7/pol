@@ -83,6 +83,9 @@ func cmdStatus(path string) error {
 			}
 			lines = append(lines, label+l.Addr+"  "+state)
 		}
+		if config.SmallUDPBuffers() {
+			lines = append(lines, "", yellow("! "+config.SmallBuffersHint))
+		}
 		box("pol server", lines)
 		return nil
 	}
@@ -126,6 +129,9 @@ func cmdStatus(path string) error {
 			}
 		}
 		lines = append(lines, fmt.Sprintf("%-*s %-8s %s", modeW, m.Mode, ports, state))
+	}
+	if config.SmallUDPBuffers() {
+		lines = append(lines, "", yellow("! "+config.SmallBuffersHint))
 	}
 	box("pol relay", lines)
 	live := map[string]relay.PortStatus{}

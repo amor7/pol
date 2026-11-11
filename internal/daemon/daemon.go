@@ -44,6 +44,9 @@ func Run(path string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Info("starting pol", "version", buildinfo.Version, "role", cfg.Role)
+	if config.SmallUDPBuffers() {
+		log.Warn(config.SmallBuffersHint)
+	}
 
 	switch cfg.Role {
 	case config.RoleServer:
