@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/net/ipv4"
@@ -61,6 +62,8 @@ func openFakeTCP(lport uint16, rule []string) (*fakeTCP, error) {
 	if err != nil {
 		return nil, err
 	}
+	_ = raw.SetWriteBuffer(4 << 20)
+	_ = raw.SetReadBuffer(4 << 20)
 	pc := ipv4.NewPacketConn(raw)
 	if err := pc.SetControlMessage(ipv4.FlagDst, true); err != nil {
 		raw.Close()
@@ -149,8 +152,21 @@ func (f *fakeTCP) write(s segment) error {
 	copy(b[20:], opts)
 	copy(b[hl:], s.payload)
 	binary.BigEndian.PutUint16(b[16:], tcpChecksum(s.src, s.dst, b))
-	_, err := f.raw.WriteToIP(b, &net.IPAddr{IP: s.dst})
-	return err
+	dst := &net.IPAddr{IP: s.dst}
+	for try := 0; ; try++ {
+		_, err := f.raw.WriteToIP(b, dst)
+		if !errors.Is(err, syscall.ENOBUFS) {
+			return err
+		}
+		// The interface's queue is full: a raw socket says so rather than
+		// waiting as a UDP socket would. Give it a moment, and if it is
+		// still full, let the segment go - to KCP it is a lost packet,
+		// which it resends, not a reason to end the session.
+		if try >= 3 {
+			return nil
+		}
+		time.Sleep(time.Duration(try+1) * time.Millisecond)
+	}
 }
 
 // advance moves an acknowledgement number forward to v, never back - a late
