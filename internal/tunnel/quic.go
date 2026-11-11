@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"sync"
@@ -134,6 +135,7 @@ func (q *QUICClient) get(ctx context.Context) (*quic.Conn, error) {
 	start := time.Now()
 	c, err := quic.DialAddr(ctx, q.addr, q.tlsCfg, quicConfig())
 	if err != nil {
+		err = fmt.Errorf("quic handshake with %s: %w", q.addr, err)
 		q.failed(err)
 		return nil, err
 	}
@@ -175,7 +177,7 @@ func (q *QUICClient) Dial(target string) (net.Conn, error) {
 		st, err := c.OpenStreamSync(ctx)
 		cancel()
 		if err != nil {
-			last = err
+			last = fmt.Errorf("quic: opening a stream: %w", err)
 			q.drop(c)
 			continue
 		}
@@ -189,7 +191,7 @@ func (q *QUICClient) Dial(target string) (net.Conn, error) {
 		if errors.Is(err, ErrRejected) {
 			return nil, err
 		}
-		last = err
+		last = fmt.Errorf("quic: first line: %w", err)
 		q.drop(c)
 	}
 	q.failed(last)
