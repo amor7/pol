@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"strconv"
 	"strings"
 
 	"github.com/amor7/pol/internal/buildinfo"
@@ -104,6 +103,27 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 				}
 				return cmdLink(path, []string{t})
 			}},
+			{"Middle hop: pass everything on to another server (pol via)", func() error {
+				t := ask("Token of the server behind this one (pol1_..., off to stop):", "")
+				if strings.TrimSpace(t) == "" {
+					return cmdVia(path, nil)
+				}
+				return cmdVia(path, []string{t})
+			}},
+			{"Camo: the website whose TLS is borrowed", func() error {
+				site := ask("Website (empty keeps the current one):", "")
+				if strings.TrimSpace(site) == "" {
+					return cmdCamo(path, nil)
+				}
+				return cmdCamo(path, []string{site})
+			}},
+			{"DNS mode (emergency, slow): answer for a domain", func() error {
+				d := ask("Domain whose NS points at this server (off to stop):", "")
+				if strings.TrimSpace(d) == "" {
+					return cmdDNS(path, nil)
+				}
+				return cmdDNS(path, []string{d})
+			}},
 			{"Reverse mode: unlink relays", func() error {
 				for _, l := range cfg.Server.Links {
 					info("linked: %s", l.Addr)
@@ -172,8 +192,24 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 		}},
 		{"Speed test (every mode, ranked)", func() error { return cmdSpeed(path, nil) }},
 		{"Ping through the tunnel", func() error { return cmdPing(path) }},
+		{"All tunnel modes, what each is for and costs", cmdModes},
 		{"Reverse mode: set up (prints a line for the server)", func() error { return cmdReverse(path, nil) }},
-		{"CDN for ws mode (Cloudflare)", func() error {
+		{"Camo: the website whose TLS is borrowed", func() error {
+			site := ask("Website (empty keeps the current one):", "")
+			if strings.TrimSpace(site) == "" {
+				return cmdCamo(path, nil)
+			}
+			return cmdCamo(path, []string{site})
+		}},
+		{"DNS mode (emergency, slow): set up", func() error {
+			d := ask("Domain whose NS points at the server (off to stop):", "")
+			if strings.TrimSpace(d) == "" {
+				return nil
+			}
+			res := ask("A resolver this server can reach:", "8.8.8.8")
+			return cmdDNS(path, []string{d, "--resolver", res})
+		}},
+		{"CDN for ws and xhttp modes (Cloudflare)", func() error {
 			cur := ""
 			if cfg.Relay.CDN != nil {
 				cur = cfg.Relay.CDN.Host
@@ -202,31 +238,4 @@ func followLogs() error {
 	defer signal.Stop(c)
 	_ = cmdLogs([]string{"-f"})
 	return nil
-}
-
-// modeChoices are the menu's tunnel modes, with what each is for.
-var modeChoices = []struct{ mode, about string }{
-	{config.ModeTLS, "a TLS connection per user connection: encrypted and fast " + dim("(recommended)")},
-	{config.ModeSplit, "each connection over 4 TLS connections: beats per-connection throttling"},
-	{config.ModeQUIC, "streams of one QUIC connection over UDP: copes best with packet loss"},
-	{config.ModeMux, "everything inside a few HTTP/2 connections: one HTTPS session from outside"},
-	{config.ModeObfs, "encrypted TCP with no TLS handshake: looks like noise"},
-	{config.ModeWS, "a WebSocket per connection: can go through Cloudflare (CDN item)"},
-	{config.ModeReverse, "the server connects to this relay: when Iran-to-abroad is cut"},
-	{config.ModeDirect, "plain TCP/UDP straight to the port abroad: nothing added"},
-}
-
-// askMode offers the tunnel modes by number.
-func askMode() (string, bool) {
-	fmt.Println()
-	fmt.Println("   " + bold("Tunnel mode") + dim("  (`pol speedtest` shows which is fastest here)"))
-	for i, c := range modeChoices {
-		fmt.Printf("   %d) %-8s - %s\n", i+1, bold(c.mode), c.about)
-	}
-	n, err := strconv.Atoi(ask(fmt.Sprintf("Choose 1-%d:", len(modeChoices)), "1"))
-	if err != nil || n < 1 || n > len(modeChoices) {
-		warnf("choose a number from the list")
-		return "", false
-	}
-	return modeChoices[n-1].mode, true
 }

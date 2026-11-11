@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -71,6 +72,28 @@ type Server struct {
 	splits       map[string]*splitPending
 	links        map[string]*link
 	replay       replayCache
+	closers      []io.Closer
+
+	// Camo is the real website camo mode borrows (its name, as relays
+	// send it); CamoAddr where to reach it, host:443 if empty.
+	Camo     string
+	CamoAddr string
+	// Next, when set, makes this server a middle hop: everything relays
+	// ask for is passed on through Next, to the server behind it.
+	Next    Dialer
+	sshConf *ssh.ServerConfig
+	xhttp   map[string]*xSession
+}
+
+// addCloser registers something Close must close; false if already closed.
+func (s *Server) addCloser(c io.Closer) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed.Load() {
+		return false
+	}
+	s.closers = append(s.closers, c)
+	return true
 }
 
 type relaySeen struct {
@@ -112,6 +135,7 @@ func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
 	s.srv = s.httpServer(cert)
 	s.ln = l
 	s.mu.Unlock()
+	s.enableSSH(cert)
 	tlsCfg := s.srv.TLSConfig.Clone()
 	tlsCfg.NextProtos = []string{"h2", "http/1.1", ProtoRaw}
 	httpL := newChanListener(l.Addr())
@@ -135,13 +159,29 @@ func (s *Server) Serve(l net.Listener, cert tls.Certificate) error {
 
 func (s *Server) first(c net.Conn, tlsCfg *tls.Config, httpL *chanListener) {
 	_ = c.SetReadDeadline(time.Now().Add(15 * time.Second))
-	pc := &peekConn{Conn: c, br: bufio.NewReaderSize(c, 4096)}
+	pc := &peekConn{Conn: c, br: bufio.NewReaderSize(c, 32<<10)}
 	b, err := pc.br.Peek(1)
 	if err != nil {
 		c.Close()
 		return
 	}
 	ip := hostOf(c.RemoteAddr())
+	if b[0] == recHandsh && s.Camo != "" {
+		// A ClientHello naming the borrowed site is camo mode's.
+		if h, err := pc.br.Peek(5); err == nil {
+			n := int(h[3])<<8 | int(h[4])
+			if rec, err := pc.br.Peek(5 + n); err == nil && strings.EqualFold(helloSNI(rec), s.Camo) {
+				s.serveCamo(c, pc.br, ip)
+				return
+			}
+		}
+	}
+	if b[0] == 'S' {
+		if v, err := pc.br.Peek(4); err == nil && string(v) == "SSH-" {
+			s.serveSSH(pc, ip)
+			return
+		}
+	}
 	switch {
 	case b[0] == 0x16: // TLS handshake record
 		tc := tls.Server(pc, tlsCfg)
@@ -171,9 +211,15 @@ func (s *Server) first(c net.Conn, tlsCfg *tls.Config, httpL *chanListener) {
 func (s *Server) Close() error {
 	s.closed.Store(true)
 	s.mu.Lock()
-	ln, qln, conns, links := s.ln, s.qln, s.conns, s.links
-	s.conns, s.links = nil, nil
+	ln, qln, conns, links, closers, xs := s.ln, s.qln, s.conns, s.links, s.closers, s.xhttp
+	s.conns, s.links, s.closers, s.xhttp = nil, nil, nil, nil
 	s.mu.Unlock()
+	for _, x := range xs {
+		x.Close()
+	}
+	for _, c := range closers {
+		c.Close()
+	}
 	if ln != nil {
 		ln.Close()
 	}
@@ -214,6 +260,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Server", "nginx")
 	if !s.authorized(r) {
 		decoy(w)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, PathXHTTP) {
+		s.serveXHTTP(w, r)
 		return
 	}
 	switch r.URL.Path {

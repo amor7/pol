@@ -35,6 +35,8 @@ type Status struct {
 	// server
 	Listen string              `json:"listen,omitempty"`
 	Server *tunnel.ServerStats `json:"server,omitempty"`
+	// Listening is the ports the server's modes use, for the firewall.
+	Listening []string `json:"listening,omitempty"`
 
 	// relay
 	Target string              `json:"target,omitempty"` // the server it tunnels to

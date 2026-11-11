@@ -1,13 +1,22 @@
 package internal_test
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
 	"io"
 	"log/slog"
+	"math/big"
+	mrand "math/rand/v2"
 	"net"
+	"os"
 	"strconv"
 	"sync"
 	"testing"
@@ -24,6 +33,9 @@ var quiet = slog.New(slog.NewTextHandler(io.Discard, nil))
 
 const secret = "s3cret"
 
+// slow modes are left out of the tests that move many megabytes.
+var slow = map[string]bool{config.ModeDNS: true}
+
 // rig is a server and a relay on this machine with every mode set up.
 type rig struct {
 	t       *testing.T
@@ -36,6 +48,53 @@ type rig struct {
 	mgr     *relay.Manager
 }
 
+// camoSite is a stand-in for the real website camo mode borrows: its own
+// certificate authority, which the relay is told to trust, and a page.
+func camoSite(t *testing.T) string {
+	t.Helper()
+	caKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	caT := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "test CA"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign}
+	caDER, _ := x509.CreateCertificate(rand.Reader, caT, caT, &caKey.PublicKey, caKey)
+	ca, _ := x509.ParseCertificate(caDER)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	leafT := &x509.Certificate{SerialNumber: big.NewInt(2), Subject: pkix.Name{CommonName: "camo.test"}, DNSNames: []string{"camo.test"}, NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour), KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	leafDER, _ := x509.CreateCertificate(rand.Reader, leafT, ca, &key.PublicKey, caKey)
+	pool := x509.NewCertPool()
+	pool.AddCert(ca)
+	tunnel.CamoRoots = pool
+	l, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{leafDER}, PrivateKey: key}}, NextProtos: []string{"http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(30 * time.Second))
+				br := bufio.NewReader(c)
+				if _, err := br.ReadString('\n'); err != nil {
+					return
+				}
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nreal site")
+			}()
+		}
+	}()
+	return l.Addr().String()
+}
+
+func udpListen(t *testing.T) net.PacketConn {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pc
+}
+
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	cert, err := certs.Load(t.TempDir())
@@ -46,11 +105,29 @@ func newRig(t *testing.T) *rig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &tunnel.Server{Secret: secret, Log: quiet}
+	s := &tunnel.Server{Secret: secret, Log: quiet, Camo: "camo.test", CamoAddr: camoSite(t)}
 	go s.Serve(l, cert)
 	go s.ServeQUIC(l.Addr().String(), cert) // same port number, over UDP
 	t.Cleanup(func() { s.Close() })
 	r := &rig{t: t, server: s, addr: l.Addr().String(), fp: certs.Fingerprint(cert)}
+
+	// The packet modes' listeners.
+	kcpPC := udpListen(t)
+	go s.ServeKCP(kcpPC, tunnel.ProfileKCP)
+	var hopLo int
+	var hopPC net.PacketConn
+	for try := 0; try < 50 && hopPC == nil; try++ {
+		lo := 30000 + mrand.IntN(30000)
+		if pc, err := tunnel.ListenHop("127.0.0.1", lo, lo+3, quiet); err == nil && pc != nil {
+			hopLo, hopPC = lo, pc
+		}
+	}
+	if hopPC == nil {
+		t.Fatal("no free port range for hop")
+	}
+	go s.ServeKCP(hopPC, tunnel.ProfileHop)
+	dnsPC := udpListen(t)
+	go s.ServeKCP(tunnel.ListenDNS(dnsPC, "t.test"), tunnel.ProfileDNSServer)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -60,10 +137,23 @@ func newRig(t *testing.T) *rig {
 	go r.tls.Watch(ctx)
 	obfs := tunnel.NewObfsClient(r.addr, secret, 2, quiet)
 	go obfs.Watch(ctx)
-	ws := tunnel.NewWSClient(tunnel.WSConfig{Server: r.addr, Fingerprint: r.fp, SNI: "example.com"}, secret, 2, quiet)
+	wc := tunnel.WSConfig{Server: r.addr, Fingerprint: r.fp, SNI: "example.com"}
+	ws := tunnel.NewWSClient(wc, secret, 2, quiet)
 	go ws.Watch(ctx)
+	xh := tunnel.NewXHTTPClient(wc, secret, 2, quiet)
+	go xh.Watch(ctx)
+	camo := tunnel.NewCamoClient(r.addr, "camo.test", secret, 1, quiet)
+	go camo.Watch(ctx)
+	ssh := tunnel.NewSSHClient(r.addr, r.fp, secret, "example.com", quiet)
+	go ssh.Watch(ctx)
 	quic := tunnel.NewQUICClient(r.addr, r.fp, secret, "example.com", quiet)
 	go quic.Watch(ctx)
+	kcp := tunnel.NewKCPClient(kcpPC.LocalAddr().String(), secret, quiet)
+	go kcp.Watch(ctx)
+	hop := tunnel.NewHopClient("127.0.0.1", hopLo, hopLo+3, secret, quiet)
+	go hop.Watch(ctx)
+	dns := tunnel.NewDNSClient(dnsPC.LocalAddr().String(), "t.test", secret, quiet)
+	go dns.Watch(ctx)
 
 	// Reverse: the relay listens with its own certificate; the server links.
 	relayCert, err := certs.Load(t.TempDir())
@@ -83,29 +173,73 @@ func newRig(t *testing.T) *rig {
 		config.ModeSplit:   tunnel.NewSplitClient(r.tls, secret, 4),
 		config.ModeQUIC:    quic,
 		config.ModeObfs:    obfs,
+		config.ModeCamo:    camo,
 		config.ModeWS:      ws,
+		config.ModeXHTTP:   xh,
+		config.ModeSSH:     ssh,
+		config.ModeKCP:     kcp,
+		config.ModeHop:     hop,
+		config.ModeDNS:     dns,
 		config.ModeReverse: rev,
 		config.ModeDirect:  tunnel.Direct{Host: "127.0.0.1"},
 	}
+	// faketcp needs raw sockets: Linux, as root, with iptables.
+	if tunnel.FakeTCPSupported() == nil && os.Geteuid() == 0 {
+		fp := freePort(t)
+		if pc, err := tunnel.ListenFakeTCP(fp); err == nil {
+			t.Cleanup(func() { pc.Close() })
+			go s.ServeKCP(pc, tunnel.ProfileFakeTCP)
+			ft := tunnel.NewFakeTCPClient("127.0.0.1", fp, secret, quiet)
+			go ft.Watch(ctx)
+			r.dialers[config.ModeFakeTCP] = ft
+		} else {
+			t.Logf("faketcp left out: %v", err)
+		}
+	}
+	auto := &tunnel.Auto{Spec: config.ModeAuto, Modes: config.AutoModes(config.ModeAuto), Log: quiet, Get: func(m string) tunnel.Dialer {
+		if d, ok := r.dialers[m]; ok {
+			return d
+		}
+		return nil
+	}}
+	r.dialers[config.ModeAuto] = auto
 	r.mgr = relay.New(r.dialers, quiet)
 	t.Cleanup(r.mgr.Close)
 	return r
 }
 
-// eachMode runs fn as a subtest for every tunnel mode.
+func fakeTCPHere() bool { return tunnel.FakeTCPSupported() == nil && os.Geteuid() == 0 }
+
+// eachMode runs fn as a subtest for every tunnel mode set up here.
 func eachMode(t *testing.T, fn func(t *testing.T, mode string)) {
 	for _, m := range config.Modes {
-		t.Run(m, func(t *testing.T) { fn(t, m) })
+		t.Run(m, func(t *testing.T) {
+			if m == config.ModeFakeTCP && !fakeTCPHere() {
+				t.Skip("faketcp needs Linux, root and iptables")
+			}
+			fn(t, m)
+		})
 	}
+}
+
+// heavy is eachMode without the slow modes, for tests that move a lot.
+func heavy(t *testing.T, fn func(t *testing.T, mode string)) {
+	eachMode(t, func(t *testing.T, m string) {
+		if slow[m] {
+			t.Skip(m + " is too slow for this test")
+		}
+		fn(t, m)
+	})
 }
 
 // tunnelled is every mode that goes through pol's server (not direct).
 func tunnelled(t *testing.T, fn func(t *testing.T, mode string)) {
-	for _, m := range config.Modes {
-		if m != config.ModeDirect {
-			t.Run(m, func(t *testing.T) { fn(t, m) })
+	eachMode(t, func(t *testing.T, m string) {
+		if m == config.ModeDirect {
+			t.Skip("direct does not go through pol")
 		}
-	}
+		fn(t, m)
+	})
 }
 
 func freePort(t *testing.T) int {
@@ -232,7 +366,7 @@ func TestForwardEcho(t *testing.T) {
 }
 
 func TestManyConnectionsAtOnce(t *testing.T) {
-	eachMode(t, func(t *testing.T, mode string) {
+	heavy(t, func(t *testing.T, mode string) {
 		r := newRig(t)
 		p := r.forward(service(t, echo), mode)
 		var wg sync.WaitGroup
@@ -252,7 +386,7 @@ func TestManyConnectionsAtOnce(t *testing.T) {
 // The service reads the whole request, then answers; the user closes their
 // sending side first, as an HTTP/1.0 client might.
 func TestLargeDownloadAndHalfClose(t *testing.T) {
-	eachMode(t, func(t *testing.T, mode string) {
+	heavy(t, func(t *testing.T, mode string) {
 		r := newRig(t)
 		const size = 32 << 20
 		target := service(t, func(c net.Conn) {
@@ -278,7 +412,7 @@ func TestLargeDownloadAndHalfClose(t *testing.T) {
 // A large upload arrives intact and in order (split reorders chunks that
 // arrive over different connections).
 func TestLargeUploadIntact(t *testing.T) {
-	tunnelled(t, func(t *testing.T, mode string) {
+	heavy(t, func(t *testing.T, mode string) {
 		r := newRig(t)
 		const size = 16 << 20
 		sum := make(chan []byte, 1)

@@ -259,7 +259,7 @@ func cmdCDN(path string, a []string) error {
 		if err := cfg.Save(); err != nil {
 			return err
 		}
-		okf("ws mode goes straight to the server again")
+		okf("ws and xhttp go straight to the server again")
 		return apply()
 	}
 	_, sp, _ := net.SplitHostPort(r.Server)
@@ -276,7 +276,7 @@ func cmdCDN(path string, a []string) error {
 	if err := apply(); err != nil {
 		return err
 	}
-	okf("ws mode now goes through %s", bold(c.Host))
+	okf("ws and xhttp now go through %s", bold(c.Host))
 	lines := []string{
 		bold("In Cloudflare:"),
 		"1. DNS: an A record " + c.Host + " → the server's IP, proxied (orange cloud)",
@@ -288,7 +288,7 @@ func cmdCDN(path string, a []string) error {
 			yellow("(443, 2053, 2083, 2087, 2096, 8443). Set it up again on one of those:"),
 			yellow("`pol setup server --port 8443` there, then the new token here."))
 	}
-	lines = append(lines, "", dim("Then put ports on it: `pol mode <port> ws`. `pol speedtest --mode ws` checks it works."))
-	box("CDN for ws mode", lines)
+	lines = append(lines, "", dim("Then put ports on it: `pol mode <port> ws` (or xhttp). `pol speedtest --mode ws` checks it works."))
+	box("CDN for ws and xhttp", lines)
 	return nil
 }

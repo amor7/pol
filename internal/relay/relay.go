@@ -309,10 +309,17 @@ func (p *port) handle(c net.Conn) {
 
 // session is one UDP client: datagrams from it go up, answers come back.
 type session struct {
+	dead   atomic.Bool // its stream has ended
 	up     net.Conn
 	framed bool // up is a stream of framed datagrams, not a UDP socket
 	wmu    sync.Mutex
 	last   atomic.Int64
+}
+
+// Close ends the session at once (its port changed or is going away).
+func (s *session) Close() error {
+	s.dead.Store(true)
+	return s.up.Close()
 }
 
 func (s *session) send(b []byte) error {
@@ -370,27 +377,38 @@ func (p *port) serveUDP(pc net.PacketConn) {
 			return
 		}
 		key := from.String()
-		mu.Lock()
-		s := sessions[key]
-		mu.Unlock()
-		if s == nil {
-			s, err = p.openSession(pc, from, func(gone *session) {
-				mu.Lock()
-				if sessions[key] == gone {
-					delete(sessions, key)
-				}
-				mu.Unlock()
-			})
-			if err != nil {
-				p.warnDial(p.target.Load().(string), p.mode.Load().(string), err)
-				continue
-			}
+		// Twice at most: a session that turns out to have just ended (its
+		// port's mode changed, say) is replaced and the datagram sent on
+		// the new one instead of being lost.
+		for try := 0; try < 2; try++ {
 			mu.Lock()
-			sessions[key] = s
+			s := sessions[key]
+			if s != nil && s.dead.Load() {
+				delete(sessions, key)
+				s = nil
+			}
 			mu.Unlock()
-		}
-		p.up.Add(int64(n))
-		if s.send(buf[:n]) != nil {
+			if s == nil {
+				s, err = p.openSession(pc, from, func(gone *session) {
+					mu.Lock()
+					if sessions[key] == gone {
+						delete(sessions, key)
+					}
+					mu.Unlock()
+				})
+				if err != nil {
+					p.warnDial(p.target.Load().(string), p.mode.Load().(string), err)
+					break
+				}
+				mu.Lock()
+				sessions[key] = s
+				mu.Unlock()
+			}
+			if s.send(buf[:n]) == nil {
+				p.up.Add(int64(n))
+				break
+			}
+			s.dead.Store(true)
 			s.up.Close()
 		}
 	}
@@ -413,7 +431,7 @@ func (p *port) openSession(pc net.PacketConn, from net.Addr, gone func(*session)
 		return nil, err
 	}
 	s.last.Store(time.Now().Unix())
-	if !p.track(s.up, true) {
+	if !p.track(s, true) {
 		s.up.Close()
 		return nil, net.ErrClosed
 	}
@@ -421,8 +439,9 @@ func (p *port) openSession(pc net.PacketConn, from net.Addr, gone func(*session)
 	p.active.Add(1)
 	go func() {
 		defer func() {
+			s.dead.Store(true)
 			p.active.Add(-1)
-			p.track(s.up, false)
+			p.track(s, false)
 			s.up.Close()
 			gone(s)
 		}()

@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
 
 jobs:
@@ -17,3 +17,6 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
       - run: bash -n install.sh
+      # faketcp needs raw sockets and iptables: only as root.
+      - name: faketcp, as root
+        run: sudo -E "$(command -v go)" test -count=1 -v -run 'TestForwardEcho/faketcp|TestLargeDownloadAndHalfClose/faketcp|TestLargeUploadIntact/faketcp|TestUDP/faketcp|TestSpeedThroughEveryMode/faketcp' ./internal/

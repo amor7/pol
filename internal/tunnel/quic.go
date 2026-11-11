@@ -36,9 +36,19 @@ func quicConfig() *quic.Config {
 
 // ServeQUIC answers quic-mode relays on addr (UDP) until Close.
 func (s *Server) ServeQUIC(addr string, cert tls.Certificate) error {
-	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{ProtoQUIC}, MinVersion: tls.VersionTLS13}
-	ln, err := quic.ListenAddr(addr, tlsCfg, quicConfig())
+	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
+		return err
+	}
+	return s.ServeQUICConn(pc, cert)
+}
+
+// ServeQUICConn is ServeQUIC on a socket already open.
+func (s *Server) ServeQUICConn(pc net.PacketConn, cert tls.Certificate) error {
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{ProtoQUIC}, MinVersion: tls.VersionTLS13}
+	ln, err := quic.Listen(pc, tlsCfg, quicConfig())
+	if err != nil {
+		pc.Close()
 		return err
 	}
 	s.mu.Lock()

@@ -172,14 +172,14 @@ func setupServer(path string, old *config.Config, o opts) error {
 		}
 		okf("service started")
 	}
-	openPorts([]int{port})
-	openUDP([]int{port}) // quic mode
+	openForwards(serverPorts(s))
 
 	tok := token.Token{Server: net.JoinHostPort(s.PublicIP, strconv.Itoa(port)), Fingerprint: certs.Fingerprint(cert), Secret: s.Secret, SNI: s.SNI}
 	box("Server is ready", []string{
 		"tunnel   " + cyan(tok.Server),
 		"",
-		dim("If your provider has a firewall in its panel, open TCP and UDP " + strconv.Itoa(port) + " there."),
+		dim("If your provider has a firewall in its panel, open there:"),
+		dim("  " + portsText(s)),
 		dim("`pol token` prints the token again whenever you need it."),
 		dim("Type `pol` any time for the menu."),
 	})

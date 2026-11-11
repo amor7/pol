@@ -29,24 +29,26 @@ Ports (on the relay)
   add <port>... [--mode M] [--udp|--both]
                             forward ports:  2088   2088:443   2080-2085   443/udp   2088:10.0.0.5:443
   del <port>...             stop forwarding (2088 = TCP and UDP, 2088/udp = only UDP)
-  mode <port>... <M>        change the tunnel mode of forwarded ports
+  mode <port>... <M>        change the tunnel mode of forwarded ports (at once)
   list                      the forwarded ports (also: ports, ls)
+  modes                     every tunnel mode: what it is for and what it costs
 
-Tunnel modes (M), chosen per port
-  tls      a TLS connection per user connection - encrypted and fast (default)
-  split    each connection spread over 4 TLS connections - beats per-connection throttling
-  quic     streams of one QUIC connection over UDP - copes best with packet loss
-  mux      all connections inside a few HTTP/2 connections - one HTTPS session from outside
-  obfs     encrypted TCP with no TLS handshake - looks like noise
-  ws       WebSocket per connection - can go through Cloudflare (pol cdn)
-  reverse  the server connects to the relay - when Iran-to-abroad is cut (pol reverse)
-  direct   plain TCP/UDP straight to the port abroad - nothing added
+Tunnel modes (M), chosen per port - "pol modes" explains each
+  fast      auto  tls (default)  split
+  stealth   obfs  camo  mux  ssh
+  CDN       ws  xhttp
+  UDP       quic  kcp  hop  faketcp
+  special   reverse  dns  direct
+  auto:a,b  auto, choosing only among the modes named
 
 Mode setup
+  cdn <domain> | off        relay: send ws and xhttp through Cloudflare under this domain
+  camo [site]               both: the website camo borrows (default www.microsoft.com)
   reverse [--port N] | off  relay: accept the server's reverse connections; prints the line for the server
   link <token>              server: keep reverse connections to the relay that printed this
   unlink <addr> | all       server: stop that
-  cdn <domain> | off        relay: send ws mode through Cloudflare under this domain
+  dns <domain> | off        both: set up dns mode (server answers, relay asks through a resolver)
+  via <token> | off         server: be a middle hop, passing everything on to that server
 
 Everyday
   status                    every mode's state, the ports and their traffic
@@ -103,6 +105,14 @@ func Main(args []string) int {
 		err = cmdUnlink(*cfgPath, a)
 	case "cdn":
 		err = cmdCDN(*cfgPath, a)
+	case "camo":
+		err = cmdCamo(*cfgPath, a)
+	case "dns":
+		err = cmdDNS(*cfgPath, a)
+	case "via", "hop-to":
+		err = cmdVia(*cfgPath, a)
+	case "modes":
+		err = cmdModes()
 	case "list", "ls", "ports":
 		err = cmdList(*cfgPath)
 	case "status":

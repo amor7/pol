@@ -66,6 +66,9 @@ const (
 	speedDown = "@down:" // @down:<MB> sends MB megabytes, for `pol speedtest`
 	speedUp   = "@up"    // swallows everything, then says how much
 	udpPrefix = "udp:"   // udp:host:port carries framed datagrams
+	// targetPing is answered and closed at once: a health check that proves
+	// the whole road works.
+	targetPing = "@ping"
 )
 
 // udpIdle ends a UDP stream nothing has crossed for this long.
@@ -81,6 +84,21 @@ type endpoint interface {
 
 // endpoint checks a target and connects to it.
 func (s *Server) endpoint(ctx context.Context, target string) (endpoint, byte) {
+	if target == targetPing {
+		return pingEP{}, statusOK
+	}
+	if s.Next != nil {
+		// A middle hop passes everything on; the server behind it checks.
+		c, err := s.Next.Dial(target)
+		if err != nil {
+			if errors.Is(err, ErrRejected) {
+				return nil, statusUnreachable
+			}
+			s.Log.Warn("cannot reach the next hop", "err", err)
+			return nil, statusUnreachable
+		}
+		return &tcpEP{c: c}, statusOK
+	}
 	if mb, ok := strings.CutPrefix(target, speedDown); ok {
 		n, _ := strconv.Atoi(mb)
 		return downEP{mb: max(1, min(n, 200))}, statusOK
@@ -198,6 +216,11 @@ func ReadDatagram(r io.Reader, buf []byte) (int, error) {
 	}
 	return io.ReadFull(r, buf[:n])
 }
+
+type pingEP struct{}
+
+func (pingEP) run(_ *Server, to net.Conn, _ io.Reader) { _ = closeWrite(to) }
+func (pingEP) close()                                  {}
 
 type downEP struct{ mb int }
 

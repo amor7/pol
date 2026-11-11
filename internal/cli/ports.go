@@ -242,6 +242,22 @@ func modeHints(cfg *config.Config, mode string) {
 		}
 	case config.ModeQUIC:
 		info("quic uses UDP on the tunnel port - open it in the server provider's firewall if there is one")
+	case config.ModeKCP, config.ModeHop, config.ModeFakeTCP:
+		info("%s uses its own port(s) on the server - `pol status` there lists them; open them in its provider's firewall if it has one", mode)
+		if mode == config.ModeFakeTCP {
+			info("faketcp needs Linux and iptables on both servers")
+		}
+	case config.ModeDNS:
+		if cfg.Relay.DNS == nil {
+			warnf("dns mode needs setting up first: `pol dns <domain>` on both servers")
+		}
+	case config.ModeCamo:
+		info("camo borrows the TLS of %s - `pol camo` changes it (on both servers)", orDefault(cfg.Relay.Camo, "www.microsoft.com"))
+	default:
+		if strings.HasPrefix(mode, config.ModeAuto) {
+			info("auto checks its modes every 5 minutes and measures them every 3 hours (about 100 MB a day);")
+			info("`pol status` shows which it is using")
+		}
 	}
 }
 
@@ -331,7 +347,11 @@ func cmdList(path string) error {
 
 func portTable(fs []config.Forward, live map[string]relay.PortStatus) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "   %s\n", dim(fmt.Sprintf("%-10s %-22s %-8s %-10s %7s %7s %11s %11s", "PORT", "TARGET", "MODE", "STATE", "OPEN", "TOTAL", "UP", "DOWN")))
+	mw := 8
+	for _, f := range fs {
+		mw = max(mw, len(f.ModeOf()))
+	}
+	fmt.Fprintf(&b, "   %s\n", dim(fmt.Sprintf("%-10s %-22s %-*s %-10s %7s %7s %11s %11s", "PORT", "TARGET", mw, "MODE", "STATE", "OPEN", "TOTAL", "UP", "DOWN")))
 	for _, f := range fs {
 		p, ok := live[f.Key()]
 		state := dim("stopped")
@@ -347,7 +367,7 @@ func portTable(fs []config.Forward, live map[string]relay.PortStatus) string {
 		if f.UDP() {
 			name += "/udp"
 		}
-		fmt.Fprintf(&b, "   %-10s %-22s %-8s %s %7d %7d %11s %11s\n", name, f.Target, f.ModeOf(), state+strings.Repeat(" ", max(0, 10-visible(state))), p.Active, p.Total, human(p.Up), human(p.Down))
+		fmt.Fprintf(&b, "   %-10s %-22s %-*s %s %7d %7d %11s %11s\n", name, f.Target, mw, f.ModeOf(), state+strings.Repeat(" ", max(0, 10-visible(state))), p.Active, p.Total, human(p.Up), human(p.Down))
 		if ok && p.Err != "" {
 			fmt.Fprintf(&b, "   %s\n", yellow("        ↳ "+p.Err))
 		}

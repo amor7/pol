@@ -43,6 +43,22 @@ type Server struct {
 	NoQUIC bool `json:"no_quic,omitempty"`
 	// Links are relays the server keeps reverse-mode connections open to.
 	Links []Link `json:"links,omitempty"`
+	// Camo is the real website camo mode borrows the TLS of.
+	Camo string `json:"camo,omitempty"`
+	// DNSDomain, when set, makes the server answer dns mode for names under
+	// it on UDP 53; its NS record must point at this server.
+	DNSDomain string `json:"dns_domain,omitempty"`
+	// Next, when set, makes this server a middle hop: it passes everything
+	// on to the server in this token (`pol via`).
+	Next *Next `json:"next,omitempty"`
+	// Ports moves the extra ports the UDP and raw modes use.
+	Extra ExtraPorts `json:"extra_ports,omitempty"`
+}
+
+// Next is the server a middle hop passes everything on to.
+type Next struct {
+	Token string `json:"token"`
+	Mode  string `json:"mode,omitempty"` // how to reach it; tls if empty
 }
 
 // Link is a relay to keep reverse connections to (`pol link`).
@@ -68,6 +84,53 @@ type Relay struct {
 	// Reverse, when set, makes the relay accept the server's reverse-mode
 	// connections.
 	Reverse *Reverse `json:"reverse,omitempty"`
+	// Camo is the website whose TLS camo mode borrows; it must be the same
+	// as the server's.
+	Camo string `json:"camo,omitempty"`
+	// DNS sets up dns mode.
+	DNS *DNS `json:"dns,omitempty"`
+	// Ports moves the extra ports the UDP and raw modes use; they follow
+	// the server's tunnel port unless set.
+	Extra ExtraPorts `json:"extra_ports,omitempty"`
+}
+
+// DNS is the relay's side of dns mode.
+type DNS struct {
+	Domain   string `json:"domain"`   // the name the server answers for
+	Resolver string `json:"resolver"` // a resolver this relay can reach, host or host:port
+}
+
+// ExtraPorts are the ports beside the tunnel port; zero means "the default,
+// counted from the tunnel port".
+type ExtraPorts struct {
+	KCP     int `json:"kcp,omitempty"`      // UDP, tunnel port + 1
+	FakeTCP int `json:"faketcp,omitempty"`  // TCP (raw), tunnel port + 2
+	HopLo   int `json:"hop_from,omitempty"` // UDP range, tunnel port + 10
+	HopHi   int `json:"hop_to,omitempty"`   //   to tunnel port + 29
+}
+
+// Resolve fills in the defaults counted from the tunnel port.
+func (e ExtraPorts) Resolve(tunnelPort int) ExtraPorts {
+	if e.KCP == 0 {
+		e.KCP = tunnelPort + 1
+	}
+	if e.FakeTCP == 0 {
+		e.FakeTCP = tunnelPort + 2
+	}
+	if e.HopLo == 0 || e.HopHi < e.HopLo {
+		e.HopLo, e.HopHi = tunnelPort+10, tunnelPort+29
+	}
+	return e
+}
+
+// PortOf is the port number in a host:port or :port.
+func PortOf(hostport string) int {
+	_, p, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(p)
+	return n
 }
 
 // CDN is the domain a CDN serves the server under, for the ws mode.
@@ -104,59 +167,6 @@ func (f Forward) ProtoName() string {
 
 // Key tells forwards apart: a port number can be forwarded for TCP and UDP.
 func (f Forward) Key() string { return strconv.Itoa(f.Listen) + "/" + f.ProtoName() }
-
-// Tunnel modes, chosen per port.
-const (
-	// ModeMux carries every connection as a stream inside a few HTTP/2
-	// connections: one HTTPS session from outside, the most discreet.
-	ModeMux = "mux"
-	// ModeTLS gives every connection its own TLS connection: still
-	// encrypted, and much faster on lossy or per-connection-throttled paths.
-	ModeTLS = "tls"
-	// ModeDirect connects straight to the port on the server with plain
-	// TCP: nothing added, fastest, and the service's own encryption is all
-	// there is. The port has to be reachable from the relay.
-	ModeDirect = "direct"
-	// ModeSplit spreads each connection over several TLS connections, so
-	// one download moves at several connections' speed.
-	ModeSplit = "split"
-	// ModeQUIC carries connections as streams of one QUIC connection over
-	// UDP: copes with packet loss better than anything over TCP.
-	ModeQUIC = "quic"
-	// ModeObfs is TCP with an encrypted stream and no TLS handshake: looks
-	// like noise from the first byte.
-	ModeObfs = "obfs"
-	// ModeWS uses a WebSocket per connection, and can go through a CDN such
-	// as Cloudflare when the server's address is blocked.
-	ModeWS = "ws"
-	// ModeReverse has the server connect to the relay instead: for paths
-	// where Iran-to-abroad connections are cut but the other way is open.
-	ModeReverse = "reverse"
-)
-
-// Modes lists the modes in the order menus show them.
-var Modes = []string{ModeTLS, ModeSplit, ModeQUIC, ModeMux, ModeObfs, ModeWS, ModeReverse, ModeDirect}
-
-// DefaultMode is what `pol add` uses when no mode is given.
-const DefaultMode = ModeTLS
-
-// ModeOf is the forward's mode; ports saved before modes existed are mux.
-func (f Forward) ModeOf() string {
-	if f.Mode == "" {
-		return ModeMux
-	}
-	return f.Mode
-}
-
-// ValidMode reports whether m names a mode.
-func ValidMode(m string) bool {
-	for _, x := range Modes {
-		if x == m {
-			return true
-		}
-	}
-	return false
-}
 
 // Load reads the file at path.
 func Load(path string) (*Config, error) {

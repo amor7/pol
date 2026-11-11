@@ -192,6 +192,42 @@ func joinInts(ns []int) string {
 }
 
 // portFree reports whether nothing on this machine listens on TCP port n.
+// portFreeUDP reports whether nothing on this machine holds UDP port n.
+func portFreeUDP(n int) bool {
+	c, err := net.ListenPacket("udp", ":"+strconv.Itoa(n))
+	if err != nil {
+		return false
+	}
+	c.Close()
+	return true
+}
+
+// serverPorts is every port a server's modes listen on, for the firewall.
+func serverPorts(s *config.Server) []config.Forward {
+	p := config.PortOf(s.Listen)
+	e := s.Extra.Resolve(p)
+	fs := []config.Forward{{Listen: p}, {Listen: p, Proto: "udp"}, {Listen: e.KCP, Proto: "udp"}, {Listen: e.FakeTCP}}
+	for h := e.HopLo; h <= e.HopHi; h++ {
+		fs = append(fs, config.Forward{Listen: h, Proto: "udp"})
+	}
+	if s.DNSDomain != "" {
+		fs = append(fs, config.Forward{Listen: 53, Proto: "udp"})
+	}
+	return fs
+}
+
+// portsText says which ports a server needs open, for people with a
+// firewall in their provider's panel.
+func portsText(s *config.Server) string {
+	p := config.PortOf(s.Listen)
+	e := s.Extra.Resolve(p)
+	t := fmt.Sprintf("TCP %d and %d, UDP %d, %d and %d-%d", p, e.FakeTCP, p, e.KCP, e.HopLo, e.HopHi)
+	if s.DNSDomain != "" {
+		t += ", UDP 53"
+	}
+	return t
+}
+
 func portFree(n int) bool {
 	l, err := net.Listen("tcp", ":"+strconv.Itoa(n))
 	if err != nil {
