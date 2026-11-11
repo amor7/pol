@@ -36,6 +36,7 @@ Ports (on the relay)
 Tunnel modes (M), chosen per port - "pol modes" explains each
   fast      auto  tls (default)  split
   stealth   obfs  camo  mux  ssh
+  anti-filter  shield  shield-cdn   (padded: hide traffic patterns too)
   CDN       ws  xhttp
   UDP       quic  kcp  hop  faketcp
   special   reverse  dns  direct
@@ -44,6 +45,7 @@ Tunnel modes (M), chosen per port - "pol modes" explains each
 Mode setup
   cdn <domain> | off        relay: send ws and xhttp through Cloudflare under this domain
   camo [site]               both: the website camo borrows (default www.microsoft.com)
+  sni [domain] | default    relay: the server name the tunnel's TLS shows (a domain of yours is best)
   reverse [--port N] | off  relay: accept the server's reverse connections; prints the line for the server
   link <token>              server: keep reverse connections to the relay that printed this
   unlink <addr> | all       server: stop that
@@ -107,6 +109,8 @@ func Main(args []string) int {
 		err = cmdCDN(*cfgPath, a)
 	case "camo":
 		err = cmdCamo(*cfgPath, a)
+	case "sni":
+		err = cmdSNI(*cfgPath, a)
 	case "dns":
 		err = cmdDNS(*cfgPath, a)
 	case "via", "hop-to":

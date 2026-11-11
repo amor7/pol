@@ -46,7 +46,7 @@ func (s *Server) ServeQUIC(addr string, cert tls.Certificate) error {
 
 // ServeQUICConn is ServeQUIC on a socket already open.
 func (s *Server) ServeQUICConn(pc net.PacketConn, cert tls.Certificate) error {
-	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{ProtoQUIC}, MinVersion: tls.VersionTLS13}
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h3", ProtoQUIC}, MinVersion: tls.VersionTLS13}
 	ln, err := quic.Listen(pc, tlsCfg, quicConfig())
 	if err != nil {
 		pc.Close()
@@ -120,11 +120,8 @@ type QUICClient struct {
 }
 
 func NewQUICClient(server, fingerprint, secret, sni string, log *slog.Logger) *QUICClient {
-	if sni == "" {
-		sni = "example.com"
-	}
-	cfg := certs.Pinned(fingerprint, sni)
-	cfg.NextProtos = []string{ProtoQUIC}
+	cfg := certs.Pinned(fingerprint, PickSNI(sni, secret, ""))
+	cfg.NextProtos = []string{"h3"} // like HTTP/3, not a name of pol's own
 	q := &QUICClient{addr: server, tlsCfg: cfg, secret: secret, log: log}
 	q.lastErr.Store("")
 	return q

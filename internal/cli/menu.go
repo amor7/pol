@@ -201,6 +201,13 @@ func menuFor(path string, cfg *config.Config) ([]item, string) {
 			}
 			return cmdCamo(path, []string{site})
 		}},
+		{"SNI: the server name the tunnel's TLS shows", func() error {
+			d := ask("Domain (best one of yours pointing at the server; default = automatic; empty keeps it):", "")
+			if strings.TrimSpace(d) == "" {
+				return cmdSNI(path, nil)
+			}
+			return cmdSNI(path, []string{d})
+		}},
 		{"DNS mode (emergency, slow): set up", func() error {
 			d := ask("Domain whose NS points at the server (off to stop):", "")
 			if strings.TrimSpace(d) == "" {

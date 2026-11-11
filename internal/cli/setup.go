@@ -88,7 +88,7 @@ func cmdSetup(path string, a []string) error {
 func setupServer(path string, old *config.Config, o opts) error {
 	interactive := len(o.pos) == 0
 	cfg := config.New(path)
-	s := &config.Server{SNI: "example.com"}
+	s := &config.Server{} // no server name: relays pick one (tunnel.PickSNI)
 	if old != nil && old.Server != nil {
 		*s = *old.Server // reconfiguring keeps the secret, so relays stay connected
 	}

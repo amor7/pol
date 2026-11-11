@@ -12,8 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/amor7/pol/internal/certs"
 )
 
 // headerTimeout bounds how long a new stream may wait for the server to say
@@ -42,19 +40,20 @@ type member struct {
 // NewClient prepares n connections to server (host:port). Nothing is dialled
 // until the first stream or ping.
 func NewClient(server, fingerprint, secret, sni string, n int, log *slog.Logger) *Client {
-	if sni == "" {
-		sni = "example.com"
-	}
-	c := &Client{base: "https://" + server, secret: secret, log: log}
+	sni = PickSNI(sni, secret, "")
+	// The TLS is chromeDial's; HTTP/2 then runs inside it with prior
+	// knowledge, which net/http calls unencrypted HTTP/2.
+	c := &Client{base: "http://" + server, secret: secret, log: log}
 	for range max(1, n) {
 		p := new(http.Protocols)
-		p.SetHTTP2(true)
+		p.SetUnencryptedHTTP2(true)
 		tr := &http.Transport{
-			TLSClientConfig:     certs.Pinned(fingerprint, sni),
-			Protocols:           p,
-			ForceAttemptHTTP2:   true,
-			DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			TLSHandshakeTimeout: 10 * time.Second,
+			Protocols: p,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+				return chromeDial(ctx, server, sni, fingerprint, nil)
+			},
 			HTTP2: &http.HTTP2Config{
 				MaxReceiveBufferPerConnection: connWindow,
 				MaxReceiveBufferPerStream:     streamWindow,

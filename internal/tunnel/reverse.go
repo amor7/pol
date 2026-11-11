@@ -54,7 +54,7 @@ func ListenReverse(addr string, cert tls.Certificate, secret string, log *slog.L
 		return nil, err
 	}
 	r := &ReverseListener{secret: secret, log: log, ln: ln, pool: make(chan pooled, 256)}
-	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{ProtoReverse}, MinVersion: tls.VersionTLS13}
+	cfg := &tls.Config{Certificates: []tls.Certificate{cert}, NextProtos: []string{"h2", "http/1.1", ProtoReverse}, MinVersion: tls.VersionTLS13}
 	go func() {
 		for {
 			c, err := ln.Accept()
@@ -76,7 +76,7 @@ func (r *ReverseListener) Addr() net.Addr { return r.ln.Addr() }
 
 func (r *ReverseListener) accept(c *tls.Conn) {
 	_ = c.SetDeadline(time.Now().Add(15 * time.Second))
-	if err := c.Handshake(); err != nil || c.ConnectionState().NegotiatedProtocol != ProtoReverse {
+	if err := c.Handshake(); err != nil { // the POL1R line below says it is the server
 		c.Close()
 		return
 	}
@@ -205,7 +205,7 @@ func (s *Server) SetLinks(links []Link) {
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
-		k := &link{s: s, l: l, connect: tlsConnect(l.Addr, l.Fingerprint, l.SNI, ProtoReverse), wake: make(chan struct{}, 1), cancel: cancel}
+		k := &link{s: s, l: l, connect: chromeConnect(l.Addr, l.Fingerprint, PickSNI(l.SNI, s.Secret, ""), nil), wake: make(chan struct{}, 1), cancel: cancel}
 		k.lastErr.Store("")
 		s.links[addr] = k
 		go k.run(ctx)

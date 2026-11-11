@@ -18,8 +18,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/amor7/pol/internal/certs"
 )
 
 // The xhttp mode: plain HTTP requests, the way a web page fetches things.
@@ -467,10 +465,7 @@ func (x *xConn) SetWriteDeadline(time.Time) error { return nil }
 // NewXHTTPClient is the xhttp mode's relay side; cfg is where it connects,
 // as for ws (straight to the server, or through a CDN).
 func NewXHTTPClient(cfg WSConfig, secret string, warm int, log *slog.Logger) *LineDialer {
-	addr, host := cfg.Server, cfg.SNI
-	if host == "" {
-		host = "example.com"
-	}
+	addr, host := cfg.Server, PickSNI(cfg.SNI, secret, "")
 	var tlsCfg *tls.Config
 	if cfg.CDN != "" {
 		host = cfg.CDN
@@ -484,8 +479,6 @@ func NewXHTTPClient(cfg WSConfig, secret string, warm int, log *slog.Logger) *Li
 		}
 		addr = net.JoinHostPort(a, strconv.Itoa(port))
 		tlsCfg = &tls.Config{ServerName: cfg.CDN, MinVersion: tls.VersionTLS12}
-	} else {
-		tlsCfg = certs.Pinned(cfg.Fingerprint, host)
 	}
 	tr := &http.Transport{
 		TLSClientConfig:     tlsCfg,
@@ -499,10 +492,25 @@ func NewXHTTPClient(cfg WSConfig, secret string, warm int, log *slog.Logger) *Li
 		},
 		HTTP2: &http.HTTP2Config{MaxReceiveBufferPerConnection: connWindow, MaxReceiveBufferPerStream: streamWindow},
 	}
+	scheme := "https://"
+	if tlsCfg == nil {
+		// Straight to the server: Chrome's TLS (chromeDial), HTTP/2 inside
+		// it with prior knowledge.
+		scheme = "http://"
+		p := new(http.Protocols)
+		p.SetUnencryptedHTTP2(true)
+		tr.Protocols = p
+		tr.TLSClientConfig = nil
+		tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			return chromeDial(ctx, addr, host, cfg.Fingerprint, nil)
+		}
+	}
 	hc := &http.Client{Transport: tr}
-	base := "https://" + host
+	base := scheme + host
 	if _, p, _ := net.SplitHostPort(addr); p != "443" {
-		base = "https://" + net.JoinHostPort(host, p)
+		base = scheme + net.JoinHostPort(host, p)
 	}
 	return newLineDialer("xhttp", secret, warm, log, func(ctx context.Context) (net.Conn, error) {
 		idb := make([]byte, 16)

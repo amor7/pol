@@ -64,6 +64,14 @@ func TestCostProbe(t *testing.T) {
 			d := tunnel.NewWSClient(wc, secret, w, quiet)
 			return d, d.Watch
 		},
+		"shield": func(w int) (relay.Dialer, func(context.Context)) {
+			d := tunnel.NewRawClient(addr, fp, secret, "example.com", w, quiet)
+			return tunnel.Shield{L: d}, d.Watch
+		},
+		"shield-cdn": func(w int) (relay.Dialer, func(context.Context)) {
+			d := tunnel.NewXHTTPClient(wc, secret, w, quiet)
+			return tunnel.Shield{L: d}, d.Watch
+		},
 		"xhttp": func(w int) (relay.Dialer, func(context.Context)) {
 			d := tunnel.NewXHTTPClient(wc, secret, w, quiet)
 			return d, d.Watch

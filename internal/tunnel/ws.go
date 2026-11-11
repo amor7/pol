@@ -19,8 +19,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/amor7/pol/internal/certs"
 )
 
 // The ws mode: each connection is a WebSocket on the tunnel port, as a web
@@ -253,10 +251,7 @@ func NewWSClient(cfg WSConfig, secret string, warm int, log *slog.Logger) *LineD
 
 func wsConnect(cfg WSConfig, secret string) func(context.Context) (net.Conn, error) {
 	var tlsCfg *tls.Config
-	addr, host := cfg.Server, cfg.SNI
-	if host == "" {
-		host = "example.com"
-	}
+	addr, host := cfg.Server, PickSNI(cfg.SNI, secret, "")
 	if cfg.CDN != "" {
 		host = cfg.CDN
 		a := cfg.CDNAddr
@@ -269,13 +264,17 @@ func wsConnect(cfg WSConfig, secret string) func(context.Context) (net.Conn, err
 		}
 		addr = net.JoinHostPort(a, strconv.Itoa(port))
 		tlsCfg = &tls.Config{ServerName: cfg.CDN, MinVersion: tls.VersionTLS12}
-	} else {
-		tlsCfg = certs.Pinned(cfg.Fingerprint, host)
+		tlsCfg.NextProtos = []string{"http/1.1"}
 	}
-	tlsCfg.NextProtos = []string{"http/1.1"}
 	return func(ctx context.Context) (net.Conn, error) {
-		d := tls.Dialer{NetDialer: &net.Dialer{KeepAlive: 30 * time.Second}, Config: tlsCfg}
-		c, err := d.DialContext(ctx, "tcp", addr)
+		var c net.Conn
+		var err error
+		if tlsCfg != nil { // through the CDN, which shows its own certificate
+			d := tls.Dialer{NetDialer: &net.Dialer{KeepAlive: 30 * time.Second}, Config: tlsCfg}
+			c, err = d.DialContext(ctx, "tcp", addr)
+		} else { // Chrome opens a WebSocket's connection offering only http/1.1
+			c, err = chromeDial(ctx, addr, host, cfg.Fingerprint, []string{"http/1.1"})
+		}
 		if err != nil {
 			return nil, err
 		}

@@ -241,11 +241,11 @@ func cmdSpeed(path string, a []string) error {
 	fmt.Println()
 	info("%d MB each way per mode, %d connections at once, to %s", mb, speedStreams, cfg.Relay.Server)
 	fmt.Println()
-	fmt.Printf("   %s\n", dim(fmt.Sprintf("%-9s %16s %16s   %s", "MODE", "DOWNLOAD", "UPLOAD", "TRAFFIC")))
+	fmt.Printf("   %s\n", dim(fmt.Sprintf("%-10s %16s %16s   %s", "MODE", "DOWNLOAD", "UPLOAD", "TRAFFIC")))
 	var results []ctl.SpeedResult
 	for _, m := range modes {
 		if color {
-			fmt.Printf("   %-9s %s", m, dim("measuring..."))
+			fmt.Printf("   %-10s %s", m, dim("measuring..."))
 		}
 		r, err := ctl.Speed(m, mb, speedStreams)
 		if color {
@@ -255,10 +255,10 @@ func cmdSpeed(path string, a []string) error {
 			return err
 		}
 		if r.Err != "" {
-			fmt.Printf("   %-9s %s\n", m, red(fmt.Sprintf("%16s", "failed"))+dim("  "+shorten(r.Err, 70)))
+			fmt.Printf("   %-10s %s\n", m, red(fmt.Sprintf("%16s", "failed"))+dim("  "+shorten(r.Err, 70)))
 			continue
 		}
-		fmt.Printf("   %-9s %s %s   %s\n", m, bold(fmt.Sprintf("%16s", mbit(r.Down))), bold(fmt.Sprintf("%16s", mbit(r.Up))), dim(config.InfoOf(m).Overhead))
+		fmt.Printf("   %-10s %s %s   %s\n", m, bold(fmt.Sprintf("%16s", mbit(r.Down))), bold(fmt.Sprintf("%16s", mbit(r.Up))), dim(config.InfoOf(m).Overhead))
 		results = append(results, *r)
 	}
 	if len(results) > 1 {

@@ -47,17 +47,19 @@ func TestOverhead(t *testing.T) {
 	wc := tunnel.WSConfig{Server: addr, Fingerprint: fp, SNI: "example.com"}
 	tls := tunnel.NewRawClient(addr, fp, secret, "example.com", 0, quiet)
 	modes := map[string]relay.Dialer{
-		"tls":   tls,
-		"split": tunnel.NewSplitClient(tls, secret, 4),
-		"mux":   tunnel.NewClient(addr, fp, secret, "example.com", 2, quiet),
-		"obfs":  tunnel.NewObfsClient(addr, secret, 0, quiet),
-		"camo":  tunnel.NewCamoClient(addr, "camo.test", secret, 0, quiet),
-		"ws":    tunnel.NewWSClient(wc, secret, 0, quiet),
-		"xhttp": tunnel.NewXHTTPClient(wc, secret, 0, quiet),
-		"ssh":   tunnel.NewSSHClient(addr, fp, secret, "example.com", quiet),
-		"quic":  tunnel.NewQUICClient(addr, fp, secret, "example.com", quiet),
-		"kcp":   tunnel.NewKCPClient(k.LocalAddr().String(), secret, quiet),
-		"dns":   tunnel.NewDNSClient(d.LocalAddr().String(), "t.test", secret, quiet),
+		"tls":        tls,
+		"split":      tunnel.NewSplitClient(tls, secret, 4),
+		"mux":        tunnel.NewClient(addr, fp, secret, "example.com", 2, quiet),
+		"obfs":       tunnel.NewObfsClient(addr, secret, 0, quiet),
+		"camo":       tunnel.NewCamoClient(addr, "camo.test", secret, 0, quiet),
+		"ws":         tunnel.NewWSClient(wc, secret, 0, quiet),
+		"xhttp":      tunnel.NewXHTTPClient(wc, secret, 0, quiet),
+		"shield":     tunnel.Shield{L: tls},
+		"shield-cdn": tunnel.Shield{L: tunnel.NewXHTTPClient(wc, secret, 0, quiet)},
+		"ssh":        tunnel.NewSSHClient(addr, fp, secret, "example.com", quiet),
+		"quic":       tunnel.NewQUICClient(addr, fp, secret, "example.com", quiet),
+		"kcp":        tunnel.NewKCPClient(k.LocalAddr().String(), secret, quiet),
+		"dns":        tunnel.NewDNSClient(d.LocalAddr().String(), "t.test", secret, quiet),
 	}
 	var names []string
 	for n := range modes {

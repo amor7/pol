@@ -36,9 +36,9 @@ func printModes(numbered bool) []string {
 				rec = green(" (default)")
 			}
 			fmt.Printf("   %s %-8s %s%s\n", num, bold(in.Mode), in.About, rec)
-			fmt.Printf("       %-8s %s  %s\n", "", yellow(strings.Join(in.Tags, " · ")), dim("(traffic: "+in.Cost()+")"))
+			fmt.Printf("       %-10s %s  %s\n", "", yellow(strings.Join(in.Tags, " · ")), dim("(traffic: "+in.Cost()+")"))
 			if in.Needs != "" {
-				fmt.Printf("       %-8s %s\n", "", dim("needs: "+in.Needs))
+				fmt.Printf("       %-10s %s\n", "", dim("needs: "+in.Needs))
 			}
 		}
 	}
@@ -131,6 +131,48 @@ func cmdCamo(path string, a []string) error {
 	warnf("set the same site on the other server: pol camo %s", shown)
 	info("pick a large site that serves TLS 1.3 and is not blocked in Iran")
 	return nil
+}
+
+// cmdSNI shows or sets the server name the relay's TLS connections show.
+func cmdSNI(path string, a []string) error {
+	if err := requireRoot(); err != nil {
+		return err
+	}
+	cfg, err := loadAny(path)
+	if err != nil {
+		return err
+	}
+	if cfg.Relay == nil {
+		info("the relay chooses the name its connections show: run `pol sni` there")
+		return nil
+	}
+	r := cfg.Relay
+	if len(a) == 0 {
+		info("the tunnel's TLS shows the name %s", bold(tunnel.PickSNI(r.SNI, r.Secret, r.Camo)))
+		info("change it with `pol sni <domain>`: best a domain of yours whose DNS points at the server abroad")
+		info("`pol sni default` goes back to a large site chosen for this relay")
+		return nil
+	}
+	name := strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(a[0], "https://"), "http://"), "/"))
+	if name == "default" {
+		name = ""
+	}
+	if strings.ContainsAny(name, " /:") || (name != "" && !strings.Contains(name, ".")) {
+		return errors.New("give a domain like www.example.org")
+	}
+	camo := r.Camo
+	if camo == "" {
+		camo = tunnel.DefaultCamo
+	}
+	if strings.EqualFold(name, camo) {
+		return errors.New("that is camo's site: the server would take these connections for camo mode - pick another")
+	}
+	r.SNI = name
+	if err := cfg.Save(); err != nil {
+		return err
+	}
+	okf("the tunnel's TLS now shows %s", bold(tunnel.PickSNI(r.SNI, r.Secret, r.Camo)))
+	return apply()
 }
 
 func loadAny(path string) (*config.Config, error) {

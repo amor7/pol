@@ -105,6 +105,9 @@ func (s *Server) httpServer(cert tls.Certificate) *http.Server {
 	p := new(http.Protocols)
 	p.SetHTTP1(true) // ws mode, and the decoy page for browsers
 	p.SetHTTP2(true)
+	// Connections come to the HTTP server already out of TLS (see first),
+	// so HTTP/2 arrives as if unencrypted, with its preface.
+	p.SetUnencryptedHTTP2(true)
 	return &http.Server{
 		Handler:   s,
 		Protocols: p,
@@ -191,11 +194,27 @@ func (s *Server) first(c net.Conn, tlsCfg *tls.Config, httpL *chanListener) {
 			return
 		}
 		_ = tc.SetDeadline(time.Time{})
-		if tc.ConnectionState().NegotiatedProtocol == ProtoRaw {
+		if tc.ConnectionState().NegotiatedProtocol == ProtoRaw { // relays before 1.5
 			s.serveLine(tc, ip, rawPreambleWait, nil)
 			return
 		}
-		if !httpL.push(tc) {
+		// A relay offers h2 like a browser, so ALPN does not say whether
+		// this is pol's line protocol or a web request: the first bytes do.
+		// A relay's pooled connection may wait a while before them.
+		_ = tc.SetReadDeadline(time.Now().Add(rawPreambleWait))
+		tb := bufio.NewReaderSize(tc, 32<<10)
+		head, err := tb.Peek(4)
+		if err != nil {
+			tc.Close()
+			return
+		}
+		_ = tc.SetReadDeadline(time.Time{})
+		tp := &peekConn{Conn: tc, br: tb}
+		if h := string(head); h == "POL1" || h == "SPLI" {
+			s.serveLine(tp, ip, rawPreambleWait, nil)
+			return
+		}
+		if !httpL.push(tp) {
 			tc.Close()
 		}
 	case b[0] >= 'A' && b[0] <= 'Z': // plain HTTP: someone looking around

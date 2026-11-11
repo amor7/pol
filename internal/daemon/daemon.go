@@ -259,23 +259,24 @@ func startTunnels(ctx context.Context, r *config.Relay, dir string, log *slog.Lo
 		return m
 	}
 
-	t.mux = tunnel.NewClient(r.Server, r.Fingerprint, r.Secret, r.SNI, r.Conns, log)
-	tls := tunnel.NewRawClient(r.Server, r.Fingerprint, r.Secret, r.SNI, 2, log)
+	sni := tunnel.PickSNI(r.SNI, r.Secret, r.Camo)
+	t.mux = tunnel.NewClient(r.Server, r.Fingerprint, r.Secret, sni, r.Conns, log)
+	tls := tunnel.NewRawClient(r.Server, r.Fingerprint, r.Secret, sni, 2, log)
 	splitConns := r.SplitConns
 	if splitConns == 0 {
 		splitConns = 4
 	}
 	split := tunnel.NewSplitClient(tls, r.Secret, splitConns)
-	quic := tunnel.NewQUICClient(r.Server, r.Fingerprint, r.Secret, r.SNI, log)
+	quic := tunnel.NewQUICClient(r.Server, r.Fingerprint, r.Secret, sni, log)
 	obfs := tunnel.NewObfsClient(r.Server, r.Secret, 1, log)
-	wc := tunnel.WSConfig{Server: r.Server, Fingerprint: r.Fingerprint, SNI: r.SNI}
+	wc := tunnel.WSConfig{Server: r.Server, Fingerprint: r.Fingerprint, SNI: sni}
 	if r.CDN != nil {
 		wc.CDN, wc.CDNAddr, wc.CDNPort = r.CDN.Host, r.CDN.Addr, r.CDN.Port
 	}
 	ws := tunnel.NewWSClient(wc, r.Secret, 1, log)
 	xh := tunnel.NewXHTTPClient(wc, r.Secret, 1, log)
 	camo := tunnel.NewCamoClient(r.Server, r.Camo, r.Secret, 1, log)
-	ssh := tunnel.NewSSHClient(r.Server, r.Fingerprint, r.Secret, r.SNI, log)
+	ssh := tunnel.NewSSHClient(r.Server, r.Fingerprint, r.Secret, sni, log)
 	kcp := tunnel.NewKCPClient(net.JoinHostPort(host, strconv.Itoa(extra.KCP)), r.Secret, log)
 	hop := tunnel.NewHopClient(host, extra.HopLo, extra.HopHi, r.Secret, log)
 	ftcp := tunnel.NewFakeTCPClient(host, extra.FakeTCP, r.Secret, log)
@@ -296,11 +297,17 @@ func startTunnels(ctx context.Context, r *config.Relay, dir string, log *slog.Lo
 		st.Note = viaNote(r)
 		return st
 	}, ws.Watch)
-	add(config.ModeXHTTP, xh, func() tunnel.ModeStatus {
+	var xhOnce sync.Once
+	warmXH := func(ctx context.Context) { xhOnce.Do(func() { go xh.Watch(ctx) }) }
+	xhStatus := func() tunnel.ModeStatus {
 		st := xh.Status()
 		st.Note = viaNote(r)
 		return st
-	}, xh.Watch)
+	}
+	add(config.ModeXHTTP, xh, xhStatus, warmXH)
+	// The shield modes share tls's and xhttp's connections.
+	add(config.ModeShield, tunnel.Shield{L: tls}, tls.Status, warmTLS)
+	add(config.ModeShieldCDN, tunnel.Shield{L: xh}, xhStatus, warmXH)
 	add(config.ModeSSH, ssh, ssh.Status, ssh.Watch)
 	add(config.ModeKCP, kcp, kcp.Status, kcp.Watch)
 	add(config.ModeHop, hop, hop.Status, hop.Watch)

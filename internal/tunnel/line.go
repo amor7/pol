@@ -3,7 +3,6 @@ package tunnel
 import (
 	"bufio"
 	"context"
-	"crypto/tls"
 	"errors"
 	"io"
 	"log/slog"
@@ -13,8 +12,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/amor7/pol/internal/certs"
 )
 
 // Most modes open a stream the same way once their connection is up: the
@@ -54,7 +51,9 @@ func (s *Server) serveLine(c net.Conn, ip string, wait time.Duration, onLine fun
 	f := strings.Fields(string(line))
 	switch {
 	case len(f) == 3 && f[0] == "POL1" && s.secretOK(f[1]):
-		s.serveTarget(lc, ip, f[2])
+		s.serveTarget(lc, ip, f[2], false)
+	case len(f) == 3 && f[0] == "POL1P" && s.secretOK(f[1]): // shield modes
+		s.serveTarget(lc, ip, f[2], true)
 	case len(f) == 6 && f[0] == "SPLIT" && s.secretOK(f[1]):
 		idx, err1 := strconv.Atoi(f[3])
 		k, err2 := strconv.Atoi(f[4])
@@ -68,7 +67,7 @@ func (s *Server) serveLine(c net.Conn, ip string, wait time.Duration, onLine fun
 	}
 }
 
-func (s *Server) serveTarget(c net.Conn, ip, target string) {
+func (s *Server) serveTarget(c net.Conn, ip, target string, pad bool) {
 	defer c.Close()
 	ep, st := s.endpoint(context.Background(), target)
 	if _, err := c.Write([]byte{st}); err != nil || ep == nil {
@@ -76,6 +75,9 @@ func (s *Server) serveTarget(c net.Conn, ip, target string) {
 			ep.close()
 		}
 		return
+	}
+	if pad {
+		c = newPadConn(c)
 	}
 	defer ep.close()
 	if !s.track(c, true) {
@@ -104,7 +106,7 @@ func startLine(c net.Conn, line, target string) error {
 	}
 	var b [1]byte
 	if _, err := io.ReadFull(c, b[:]); err != nil {
-		return errors.New("the server closed the connection - is the token current? (`pol token` on the server)")
+		return errors.New("the server closed the connection - is the token current (`pol token` on the server), and do both servers run the same pol version (`pol update`)?")
 	}
 	_ = c.SetDeadline(time.Time{})
 	if b[0] != statusOK {
@@ -144,28 +146,7 @@ func newLineDialer(name, secret string, warm int, log *slog.Logger, connect func
 
 // NewRawClient is the tls mode: a TLS connection per stream.
 func NewRawClient(server, fingerprint, secret, sni string, warm int, log *slog.Logger) *LineDialer {
-	return newLineDialer("tls", secret, warm, log, tlsConnect(server, fingerprint, sni, ProtoRaw))
-}
-
-func tlsConnect(server, fingerprint, sni, alpn string) func(context.Context) (net.Conn, error) {
-	if sni == "" {
-		sni = "example.com"
-	}
-	cfg := certs.Pinned(fingerprint, sni)
-	cfg.NextProtos = []string{alpn}
-	return func(ctx context.Context) (net.Conn, error) {
-		d := tls.Dialer{NetDialer: &net.Dialer{KeepAlive: 30 * time.Second}, Config: cfg}
-		c, err := d.DialContext(ctx, "tcp", server)
-		if err != nil {
-			return nil, err
-		}
-		tc := c.(*tls.Conn)
-		if tc.ConnectionState().NegotiatedProtocol != alpn {
-			tc.Close()
-			return nil, errors.New("the server is an older pol without this mode - run `pol update` on it")
-		}
-		return tc, nil
-	}
+	return newLineDialer("tls", secret, warm, log, chromeConnect(server, fingerprint, PickSNI(sni, secret, ""), nil))
 }
 
 func (d *LineDialer) fresh(ctx context.Context) (net.Conn, error) {
@@ -212,13 +193,17 @@ func (d *LineDialer) get() (net.Conn, bool, error) {
 }
 
 // Dial opens a stream to target on the server's side.
-func (d *LineDialer) Dial(target string) (net.Conn, error) {
+func (d *LineDialer) Dial(target string) (net.Conn, error) { return d.dial("POL1", target) }
+
+// dial opens a stream with the first line's verb: POL1, or POL1P for the
+// padded streams of the shield modes.
+func (d *LineDialer) dial(verb, target string) (net.Conn, error) {
 	for {
 		c, fresh, err := d.get()
 		if err != nil {
 			return nil, err
 		}
-		err = startLine(c, "POL1 "+d.secret+" "+target, target)
+		err = startLine(c, verb+" "+d.secret+" "+target, target)
 		if err == nil {
 			d.open.Add(1)
 			return &countedConn{Conn: c, done: func() { d.open.Add(-1) }}, nil

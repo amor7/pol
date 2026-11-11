@@ -15,8 +15,6 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-
-	"github.com/amor7/pol/internal/certs"
 )
 
 // The ssh mode: one real SSH connection to the tunnel port, each user
@@ -115,17 +113,12 @@ func (c *SSHClient) key(ctx context.Context) (ssh.PublicKey, error) {
 	if c.hostKey != nil {
 		return c.hostKey, nil
 	}
-	sni := c.sni
-	if sni == "" {
-		sni = "example.com"
-	}
-	d := tls.Dialer{Config: certs.Pinned(c.fp, sni)}
-	conn, err := d.DialContext(ctx, "tcp", c.addr)
+	conn, err := chromeDial(ctx, c.addr, PickSNI(c.sni, c.secret, ""), c.fp, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	certs := conn.(*tls.Conn).ConnectionState().PeerCertificates
+	certs := conn.ConnectionState().PeerCertificates
 	if len(certs) == 0 {
 		return nil, errors.New("ssh: no certificate to learn the host key from")
 	}

@@ -46,7 +46,7 @@ Every port has its own mode; change it any time with `pol mode <port> <mode>`. `
 **Traffic** is what a mode adds on top of your users' own data, in three parts, all measured on a clean link (`TestOverhead`, `TestCostProbe`):
 
 - **on transfers**: per byte moved; what a big download costs.
-- **per connection**: to open one; what web pages and apps cost, since they open many short connections. That is where tls and split cost the most, and obfs, mux and ssh the least.
+- **per connection**: to open one; what web pages and apps cost, since they open many short connections. That is where split and tls cost the most, and obfs, mux and ssh the least.
 - **a day idle**: keeping the mode ready with nobody on it. A mode is kept ready only while a port uses it.
 
 Packet headers (a few % for every mode) and resends on a lossy path come on top.
@@ -56,8 +56,8 @@ Packet headers (a few % for every mode) and resends on a lossy path come on top.
 | Mode | How it travels | Good for | Traffic |
 |---|---|---|---|
 | **auto** | ranks the other modes and uses the best one that works; switches at once when one fails | not having to watch it | ~100 MB a day for its checks + the chosen mode's |
-| **tls** *(default)* | a TLS connection per user connection, from a pool kept ready | **high-speed download, high-speed upload** | +1% · +3.5 kB per connection · 14 MB/day idle |
-| **split** | each user connection spread over 4 TLS connections at once, reassembled in order | **high-speed download and upload**, even for one big file; beats per-connection throttling | +1% · **+14 kB per connection** · 15 MB/day idle |
+| **tls** *(default)* | a TLS connection per user connection, from a pool kept ready | **high-speed download, high-speed upload** | +1% · +4 kB per connection · 14 MB/day idle |
+| **split** | each user connection spread over 4 TLS connections at once, reassembled in order | **high-speed download and upload**, even for one big file; beats per-connection throttling | +1% · **+16 kB per connection** · 15 MB/day idle |
 
 ### Stealth
 
@@ -68,11 +68,20 @@ Packet headers (a few % for every mode) and resends on a lossy path come on top.
 | **mux** | everything as streams inside a few HTTP/2 connections | one long HTTPS session from outside | +1% · +0.2 kB per connection · 24 MB/day idle |
 | **ssh** | one real SSH connection, a channel per user connection | looks like server administration | +1% · +0.4 kB per connection · 1.5 MB/day idle |
 
+### Anti-filter
+
+These hide the **pattern** of the traffic too. A user's own TLS handshake carried inside the tunnel's TLS has a recognisable rhythm of packet sizes ("TLS in TLS"), which filters can look for. The shield modes pad each connection's first packets to random sizes, add a little padding later, and cut long writes at random lengths.
+
+| Mode | How it travels | Good for | Traffic |
+|---|---|---|---|
+| **shield** | tls, with padded packets | **hardest to spot directly**; high-speed download | +1% · +4.5 kB per connection · shares tls's 14 MB/day idle |
+| **shield-cdn** | xhttp, with the same padding | the same, **through a CDN** when the server's IP is blocked | +1-2% · +0.7 kB per connection · shares xhttp's 2 MB/day idle |
+
 ### CDN
 
 | Mode | How it travels | Good for | Traffic |
 |---|---|---|---|
-| **ws** | a WebSocket per user connection | going **through Cloudflare** when the server's IP is blocked (`pol cdn`) | +1% · +4 kB per connection · 9 MB/day idle |
+| **ws** | a WebSocket per user connection | going **through Cloudflare** when the server's IP is blocked (`pol cdn`) | +1% · +4.5 kB per connection · 9 MB/day idle |
 | **xhttp** | plain HTTP: one long GET down, numbered POSTs up | through CDNs and proxies that carry **only ordinary requests**; looks like web browsing | +1% · +0.5 kB per connection · 2 MB/day idle |
 
 ### UDP
@@ -98,6 +107,17 @@ Packet headers (a few % for every mode) and resends on a lossy path come on top.
 2. Put the port on the winner (`pol mode 2088 mux`), or on `auto` to let pol keep choosing. For ordinary use (web, apps: many short connections) prefer **mux or obfs**: about as fast, and far cheaper per connection than tls or split. Keep **split** for big downloads.
 3. For games, try quic first; kcp, hop and faketcp give lower ping on bad paths, but cost much more traffic.
 4. Keep a ws or xhttp port through a CDN ready for the day the server's IP is blocked.
+5. Worried the relay gets noticed (its foreign traffic cut, "Iran access")? Use **shield**, **camo** or **mux**; avoid heavy kcp/hop/faketcp (lots of UDP to one foreign IP stands out), and set a domain of your own with `pol sni` (below).
+
+### What anyone watching sees
+
+Every TLS connection the relay makes starts like a current Chrome's: the same ClientHello, offering h2 and http/1.1, and TLS 1.3, so the server's certificate is encrypted. No protocol name of pol's own is sent. The server name is a large site chosen per relay (`www.apple.com`, `www.bing.com`, ...), or the one you set:
+
+```bash
+pol sni www.your-domain.com
+```
+
+Best is a domain of yours whose DNS points at the server abroad: then the name and the address agree. `pol sni default` goes back to the chosen one.
 
 ## Ports to open
 
@@ -198,6 +218,7 @@ On the **relay** (Iran):
 | `pol ping` | round-trip time through the tunnel |
 | `pol cdn <domain> [--ip A]` · `pol cdn off` | send ws and xhttp through a CDN |
 | `pol camo <site>` | the website camo borrows (same on both servers) |
+| `pol sni <domain>` · `pol sni default` | the server name the tunnel's TLS shows |
 | `pol reverse` · `pol reverse off` | set up / remove reverse mode |
 | `pol dns <domain> [--resolver A]` · `pol dns off` | set up dns mode |
 
@@ -238,13 +259,14 @@ Later updates the same way: `pol update --file pol-linux-amd64`.
 
 Whatever the mode, a stream ends the same way on the server: the relay names the target and the secret, the server checks them (its own ports only, unless `any_target`), connects, answers one status byte, and copies both ways. The modes differ only in the road:
 
-- **tls / split**: TLS 1.3 with ALPN `pol1`, the server's certificate pinned by fingerprint. split numbers 16 kB chunks, sends each on whichever of its connections is free, and the other side reorders them.
-- **mux**: HTTP/2, a `POST` per connection; each stream has its own 4 MB window and the connection 256 MB, so one user who stops reading only stops their own stream.
+- **tls / split**: TLS 1.3 started with Chrome's ClientHello (uTLS), the server's certificate pinned by fingerprint. The server tells the line protocol from web requests by the first bytes inside the encryption, not by ALPN. split numbers 16 kB chunks, sends each on whichever of its connections is free, and the other side reorders them.
+- **mux**: HTTP/2 inside the same Chrome-started TLS, a `POST` per connection; each stream has its own 4 MB window and the connection 256 MB, so one user who stops reading only stops their own stream.
 - **obfs**: 32 random bytes, then AES-256-CTR keyed from the secret and those bytes, with a timestamp and random padding; replayed recordings are ignored.
 - **camo**: the relay sends a Chrome ClientHello naming the borrowed site; the server passes the handshake to the real site and back, so the relay gets the site's real certificate. The relay's next record is AES-GCM sealed with keys from the secret and the handshake's server random. The first record that opens with them switches the connection over; until then, everything goes to the real site.
 - **ws / xhttp**: an HTTP/1.1 WebSocket upgrade, or a GET plus numbered POSTs, on the tunnel port, with keepalives so CDNs keep them open.
 - **ssh**: a real SSH-2 handshake on the tunnel port, with the server's host key pinned through its certificate, and a channel per connection.
-- **quic**: QUIC (TLS 1.3 inside) on the tunnel port's number over UDP, a stream per connection.
+- **quic**: QUIC (TLS 1.3 inside, ALPN `h3` like HTTP/3) on the tunnel port's number over UDP, a stream per connection.
+- **shield / shield-cdn**: tls or xhttp, the first line saying `POL1P`; the stream is then framed as 2 bytes of length, 2 of padding length, data and padding. The first 8 frames each way are padded to 300-1400 bytes; later ones get up to 256 bytes (small) or 64 (large); writes are cut at random lengths between 4 and 16 kB.
 - **kcp / hop / faketcp / dns**: KCP (AES-encrypted, with FEC except dns) carrying an smux session, a stream per connection. The packets travel over plain UDP, over UDP that changes destination port every 30 seconds, as TCP segments on a raw socket (after a real handshake, with resets suppressed in iptables' raw table), or inside DNS queries and answers.
 - **reverse**: the server dials the relay's reverse port (the relay's certificate pinned), proves the secret, and leaves connections waiting for users.
 

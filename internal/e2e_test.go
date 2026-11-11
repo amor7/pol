@@ -170,20 +170,22 @@ func newRig(t *testing.T) *rig {
 	s.SetLinks([]tunnel.Link{{Addr: rev.Addr().String(), Fingerprint: certs.Fingerprint(relayCert)}})
 
 	r.dialers = map[string]relay.Dialer{
-		config.ModeMux:     r.mux,
-		config.ModeTLS:     r.tls,
-		config.ModeSplit:   tunnel.NewSplitClient(r.tls, secret, 4),
-		config.ModeQUIC:    quic,
-		config.ModeObfs:    obfs,
-		config.ModeCamo:    camo,
-		config.ModeWS:      ws,
-		config.ModeXHTTP:   xh,
-		config.ModeSSH:     ssh,
-		config.ModeKCP:     kcp,
-		config.ModeHop:     hop,
-		config.ModeDNS:     dns,
-		config.ModeReverse: rev,
-		config.ModeDirect:  tunnel.Direct{Host: "127.0.0.1"},
+		config.ModeMux:       r.mux,
+		config.ModeTLS:       r.tls,
+		config.ModeSplit:     tunnel.NewSplitClient(r.tls, secret, 4),
+		config.ModeQUIC:      quic,
+		config.ModeObfs:      obfs,
+		config.ModeCamo:      camo,
+		config.ModeWS:        ws,
+		config.ModeXHTTP:     xh,
+		config.ModeShield:    tunnel.Shield{L: r.tls},
+		config.ModeShieldCDN: tunnel.Shield{L: xh},
+		config.ModeSSH:       ssh,
+		config.ModeKCP:       kcp,
+		config.ModeHop:       hop,
+		config.ModeDNS:       dns,
+		config.ModeReverse:   rev,
+		config.ModeDirect:    tunnel.Direct{Host: "127.0.0.1"},
 	}
 	// faketcp needs raw sockets: Linux, as root, with iptables.
 	if tunnel.FakeTCPSupported() == nil && os.Geteuid() == 0 {

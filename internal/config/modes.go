@@ -20,21 +20,25 @@ const (
 	ModeReverse = "reverse"
 	ModeDirect  = "direct"
 	ModeAuto    = "auto"
+	// The shield modes: tls and xhttp with padded streams.
+	ModeShield    = "shield"
+	ModeShieldCDN = "shield-cdn"
 )
 
 // Group is what a mode is for, as menus and docs sort them.
 type Group string
 
 const (
-	GroupFast    Group = "Fast"    // everyday speed
-	GroupStealth Group = "Stealth" // hard to recognise or block
-	GroupCDN     Group = "CDN"     // through Cloudflare or another CDN
-	GroupUDP     Group = "UDP"     // for packet loss, gaming, UDP throttling
-	GroupSpecial Group = "Special" // for particular situations
+	GroupFast    Group = "Fast"        // everyday speed
+	GroupStealth Group = "Stealth"     // hard to recognise or block
+	GroupShield  Group = "Anti-filter" // hide traffic patterns too
+	GroupCDN     Group = "CDN"         // through Cloudflare or another CDN
+	GroupUDP     Group = "UDP"         // for packet loss, gaming, UDP throttling
+	GroupSpecial Group = "Special"     // for particular situations
 )
 
 // Groups in the order they are shown.
-var Groups = []Group{GroupFast, GroupStealth, GroupCDN, GroupUDP, GroupSpecial}
+var Groups = []Group{GroupFast, GroupStealth, GroupShield, GroupCDN, GroupUDP, GroupSpecial}
 
 // Tags, short enough for a menu line.
 const (
@@ -49,6 +53,7 @@ const (
 	TagEmerg    = "emergency only"
 	TagShort    = "many short connections: web, apps"
 	TagBig      = "big downloads"
+	TagPattern  = "hides traffic patterns"
 )
 
 // Info describes a mode for the people choosing one.
@@ -90,13 +95,15 @@ func (in Info) Cost() string {
 // Infos is every mode, in the order menus show them.
 var Infos = []Info{
 	{ModeAuto, GroupFast, "picks the best working mode by itself and switches when one fails", []string{"no babysitting"}, "about 100 MB a day for its checks, plus the chosen mode's costs", "", "", ""},
-	{ModeTLS, GroupFast, "a TLS connection per user connection", []string{TagDownload, TagUpload}, "+1%", "", "+3.5 kB", "14 MB"},
-	{ModeSplit, GroupFast, "each user connection spread over 4 TLS connections", []string{TagDownload, TagUpload, TagBig, "beats per-connection throttling"}, "+1%", "", "+14 kB", "15 MB"},
+	{ModeTLS, GroupFast, "a TLS connection per user connection", []string{TagDownload, TagUpload}, "+1%", "", "+4 kB", "14 MB"},
+	{ModeSplit, GroupFast, "each user connection spread over 4 TLS connections", []string{TagDownload, TagUpload, TagBig, "beats per-connection throttling"}, "+1%", "", "+16 kB", "15 MB"},
 	{ModeObfs, GroupStealth, "encrypted TCP with no TLS handshake: looks like noise", []string{TagDownload, TagStealth, TagShort}, "under +1%", "", "+0.2 kB", "2.5 MB"},
 	{ModeCamo, GroupStealth, "borrows a real website's TLS (www.microsoft.com); probers get the real site", []string{TagStealth, "strongest against probing"}, "+1%", "", "+4 kB or more (the site's certificates)", "7 MB"},
 	{ModeMux, GroupStealth, "everything inside a few HTTP/2 connections: one HTTPS session from outside", []string{TagStealth, TagShort}, "+1%", "", "+0.2 kB", "24 MB"},
 	{ModeSSH, GroupStealth, "one real SSH connection, a channel per user connection: looks like server admin", []string{TagStealth, TagShort}, "+1%", "", "+0.4 kB", "1.5 MB"},
-	{ModeWS, GroupCDN, "a WebSocket per user connection", []string{TagCDN, TagIPBlock}, "+1%", "a CDN domain for the IP-blocked case (pol cdn)", "+4 kB", "9 MB"},
+	{ModeShield, GroupShield, "tls with padded packets: the first sizes of each connection no longer show the user's own TLS inside", []string{TagStealth, TagPattern, TagDownload}, "+1%", "", "+4.5 kB", "tls's 14 MB"},
+	{ModeShieldCDN, GroupShield, "xhttp with the same padding; works through a CDN", []string{TagStealth, TagPattern, TagCDN, TagIPBlock}, "+1-2%", "a CDN domain for the IP-blocked case (pol cdn)", "+0.7 kB", "xhttp's 2 MB"},
+	{ModeWS, GroupCDN, "a WebSocket per user connection", []string{TagCDN, TagIPBlock}, "+1%", "a CDN domain for the IP-blocked case (pol cdn)", "+4.5 kB", "9 MB"},
 	{ModeXHTTP, GroupCDN, "plain HTTP requests: one long GET down, POSTs up", []string{TagCDN, TagIPBlock, "looks like web browsing"}, "+1%", "a CDN domain for the IP-blocked case (pol cdn)", "+0.5 kB", "2 MB"},
 	{ModeQUIC, GroupUDP, "streams of one QUIC connection over UDP", []string{TagLossy, TagGaming}, "+3%", "UDP on the tunnel port", "+0.7 kB", "5 MB"},
 	{ModeKCP, GroupUDP, "KCP over UDP, lost packets rebuilt from spare data", []string{TagGaming, TagLossy}, "+45-75%", "UDP tunnel port + 1", "+6 kB", "8 MB"},
@@ -158,7 +165,7 @@ func AutoModes(spec string) []string {
 	// Not dns (too slow to carry users), direct (nothing to check) or
 	// auto itself. faketcp, reverse and ws through a CDN join only where
 	// they are set up - the relay leaves out what it cannot use.
-	return []string{ModeSplit, ModeTLS, ModeQUIC, ModeObfs, ModeCamo, ModeMux, ModeXHTTP, ModeWS, ModeSSH, ModeKCP, ModeHop, ModeFakeTCP, ModeReverse}
+	return []string{ModeSplit, ModeTLS, ModeQUIC, ModeObfs, ModeCamo, ModeMux, ModeShield, ModeXHTTP, ModeWS, ModeSSH, ModeKCP, ModeHop, ModeFakeTCP, ModeReverse}
 }
 
 // ValidMode reports whether m names a mode, "auto:a,b" included.
